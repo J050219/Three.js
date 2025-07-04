@@ -14,15 +14,24 @@
         border-radius: 8px;
         font-family: sans-serif;
       }
+      label { display: block; margin: 5px 0; }
     </style>
   </head>
   <body>
     <div id="ui">
+        <label>
+            選擇圖形：
+            <select id="shapeType">
+                <option value="box">矩形</option>
+                <option value="circle">圓形</option>
+                <option value="lshape">不規則圖形（L型）</option>
+            </select>
+        </label> 
     <label>寬度: <input type="number" id="width" value="20"></label><br>
     <label>高度: <input type="number" id="height" value="40"></label><br>
     <label>深度: <input type="number" id="depth" value="10"></label><br>
     <label>顏色: <input type="color" id="color" value="#00ff00"></label><br>
-    <button id="generate">產生 L 型物體</button>
+    <button id="generate">產生物體</button>
   </div>
     <script type="module" src="/main.js"></script>
   </body>
