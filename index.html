@@ -1,13 +1,29 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-Hant">
   <head>
     <meta charset="utf-8">
-    <title>My first three.js app</title>
+    <title>產生物體</title>
     <style>
-      body { margin: 0; }
+      body { margin: 0; overflow: hidden; }
+      #ui {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(255, 255, 255, 0.8);
+        padding: 10px;
+        border-radius: 8px;
+        font-family: sans-serif;
+      }
     </style>
   </head>
   <body>
+    <div id="ui">
+    <label>寬度: <input type="number" id="width" value="20"></label><br>
+    <label>高度: <input type="number" id="height" value="40"></label><br>
+    <label>深度: <input type="number" id="depth" value="10"></label><br>
+    <label>顏色: <input type="color" id="color" value="#00ff00"></label><br>
+    <button id="generate">產生 L 型物體</button>
+  </div>
     <script type="module" src="/main.js"></script>
   </body>
 </html>
