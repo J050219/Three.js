@@ -13,6 +13,15 @@
         padding: 12px;
         border-radius: 8px;
         font-family: sans-serif;
+        z-index: 10;
+      }
+      .parm-group {
+        margin-bottom: 10px;
+      }
+      .parm-group input {
+        margin: 2px 0 ;
+        display: block;
+        width: 100px;
       }
       label { display: block; margin: 5px 0; }
     </style>
@@ -22,22 +31,40 @@
         <label>
             選擇圖形：
             <select id="shapeType">
-                <option value="box">矩形</option>
-                <option value="cube">立方體（Cube）</option>
-                <option value="circle">球體（Sphere）</option>
-                <option value="lshape">不規則圖形（自訂）</option>
+                <option value="cube">立方體</option>
+                <option value="circle">球體</option>
+                <option value="lshape">不規則圖形</option>
             </select>
         </label>
-        <label><input type="checkbox" id="hasHole"> 是否簍空</label>
-        <div id="holeInput" style="display:none;">
-            <label>簍空寬度：<input type="number" id="holeWidth" value="10"></label>
-            <label>簍空高度：<input type="number" id="holeHeight" value="5"></label>
+        <div id="boxParams" class="param-group">
+            <input id="boxWidth" type="number" placeholder="寬 (Width)" />
+            <input id="boxHeight" type="number" placeholder="高 (Height)" />
+            <input id="boxDepth" type="number" placeholder="深 (Depth)" />
         </div>
-        
-        <label>寬度: <input type="number" id="width" value="20"></label><br>
-        <label>高度: <input type="number" id="height" value="40"></label><br>
-        <label>深度: <input type="number" id="depth" value="10"></label><br>
-        <label>顏色: <input type="color" id="color" value="#00ff00"></label><br>
+
+        <div id="sphereParams" class="param-group" style="display:none;">
+            <input id="sphereWidth" type="number" placeholder="直徑 (Diameter)" />
+        </div>
+
+        <div id="customParams" class="param-group" style="display:none;">
+            <input id="customWidth" type="number" placeholder="寬 (Width)" />
+            <input id="customHeight" type="number" placeholder="高 (Height)" />
+            <input id="customDepth" type="number" placeholder="厚度 (Depth)" />
+        </div>
+
+        <label>
+            顏色：
+            <input id="color" type="color" value="#00ff00" />
+        </label>
+
+        <label>
+            <input type="checkbox" id="hasHole" /> 是否簍空
+        </label>
+
+        <div id="holeInput" style="display:none;">
+            <input id="holeWidth" type="number" placeholder="孔寬 (Hole Width)" />
+            <input id="holeHeight" type="number" placeholder="孔高 (Hole Height)" />
+        </div>
         <button id="generate">產生物體</button>
     </div>
     <script type="module" src="/main.js"></script>
