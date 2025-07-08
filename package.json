@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "three": "^0.160.1",
+    "three-csg-ts": "^3.2.0",
     "three-js-csg": "^72.0.0"
   },
   "devDependencies": {
