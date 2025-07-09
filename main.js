@@ -10,7 +10,6 @@ renderer.setSize( window.innerWidth, window.innerHeight );
 document.body.appendChild( renderer.domElement );
 
 camera.position.set(0, 0, 100);
-//const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
 scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 const light = new THREE.DirectionalLight(0xffffff, 1);
 light.position.set(50, 50, 100);
@@ -64,7 +63,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         //const outerBSP = CSG.fromMesh(outer);
         if (hasHole) {
             const inner = new THREE.Mesh(new THREE.SphereGeometry(holeWidth / 2, 32, 32),material);
-            inner.position.z = 0;
+            inner.position.z = 0.1;
             outer.updateMatrix();
             inner.updateMatrix();
             //const innerBSP = CSG.fromMesh(inner);
@@ -146,6 +145,7 @@ renderer.domElement.addEventListener('mousedown', (event) => {
 renderer.domElement.addEventListener('mouseup', () => {
     isDragging = false;
 });
+
 renderer.domElement.addEventListener('mousemove',(event) =>{
     if(!isDragging || !cube) return;
 
@@ -162,7 +162,7 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
             'XYZ'
         ));
     
-        cube.quaternion.multiplyQuaternions(deltaRotatiomQuaternion, cube.quaternion);
+    cube.quaternion.multiplyQuaternions(deltaRotatiomQuaternion, cube.quaternion);
 
     previousMousePosition = {
         x: event.clientX,
