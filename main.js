@@ -5,22 +5,30 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera( 75, window.innerWidth / window.innerHeight, 0.1, 1000 );
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize( window.innerWidth, window.innerHeight );
-//renderer.setAnimationLoop( animate );
-//document.body.style.margin = 0;
 document.body.appendChild( renderer.domElement );
 
-camera.position.set(0, 0, 100);
-//const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+camera.position.set(0, 200, 0);
+camera.lookAt(0, 0, 0);
+camera.up.set(0, 0, -1);
+
 scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 const light = new THREE.DirectionalLight(0xffffff, 1);
 light.position.set(50, 50, 100);
 scene.add(light);
 
+const palletGeometry = new THREE.BoxGeometry(100, 10, 100);
+const palletMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
+const pallet = new THREE.Mesh(palletGeometry, palletMaterial);
+pallet.position.y = -5;
+scene.add(pallet);
+
 let cube = null;
+
+
 
 function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight) {
     if (cube) {
-        scene.remove(cube);
+        pallet.remove(cube);
         cube.geometry.dispose();
         cube.material.dispose();
     }
@@ -30,67 +38,43 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
 
     if (type === 'cube') {
         const outer = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
-        //const outerBSP = CSG.fromMesh(outer);
+        
         if (hasHole) {
             const inner = new THREE.Mesh(new THREE.BoxGeometry(holeWidth, holeHeight, depth + 2), material);
-            inner.position.z = 0
+            //inner.position.z = 0
             outer.updateMatrix();
             inner.updateMatrix();
-            //const innerBSP = CSG.fromMesh(inner);
-            //const subtracted = CSG.subtract(outerBSP, innerBSP);
-            //mesh = CSG.toMesh(subtracted, outer.matrixWorld, material);
+        
             try{
                 const result = CSG.subtract(outer, inner);
                 result.geometry.computeVertexNormals();
                 mesh = result;
-                //mesh = CSG.subtract(outer, inner);
-                //mesh.material = material;
             }catch(err){
                 console.error('CSG subtraction failed:',err);
                 mesh = outer;
-                //mesh.material = material;
-            }            
-            //if(!mesh){
-                
-                //console.warn('簍空失敗!');
-            //}
+            } 
         } else {
             mesh = outer;
-            //mesh.material = material;
         }
-    }
-    else if (type === 'circle') {
+    }else if (type === 'circle') {
         const outer = new THREE.Mesh(new THREE.SphereGeometry(width / 2, 32, 32), material);
-        //const outerBSP = CSG.fromMesh(outer);
+        
         if (hasHole) {
             const inner = new THREE.Mesh(new THREE.SphereGeometry(holeWidth / 2, 32, 32),material);
-            inner.position.z = 0;
+            //inner.position.z = 0;
             outer.updateMatrix();
             inner.updateMatrix();
-            //const innerBSP = CSG.fromMesh(inner);
-            //const subtracted = CSG.subtract(outerBSP, innerBSP);
 
-            //mesh = CSG.toMesh(subtracted, outer.matrixWorld, material);
             try{
                 const result = CSG.subtract(outer, inner);
                 result.geometry,computeVertexNormals();
                 mesh = result;
-                //mesh = CSG.subtract(outer, inner);
-                //mesh.material = material;
             }catch(err){
                 console.error('CSG subtraction failed:',err);
                 mesh = outer;
-                //mesh.material = material;
-            }            
-            
-            //if(!mesh){
-                
-                //console.warn('簍空失敗!');
-            //}
-           
+            }  
         } else {
             mesh = outer;
-            //mesh.material = material;
         }
     }else if (type === 'lshape') {
         const shape = new THREE.Shape();
@@ -114,55 +98,102 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         const geometry = new THREE.ExtrudeGeometry(shape,{depth, bevelEnabled: false});
         mesh = new THREE.Mesh(geometry, material);
     }
+    
+    const box = new THREE.Box3().setFromObject(mesh);
+    const objectHeight = box.max.y - box.min.y;
+
+    const palletTopY = pallet.position.y + pallet.geometry.parameters.height / 2;
+    const cubeBottomY = objectHeight / 2;
+
+    mesh.position.set(0, palletTopY + cubeBottomY, 0);
     cube = mesh;
-    mesh.position.set(0, 0, 0);
-    //console.log(mesh);
-    scene.add(mesh);
+    pallet.add(cube);
 }
-
-function animate() {
-
-    requestAnimationFrame( animate );
-    //自動旋轉
-    //if(cube){
-        //cube.rotation.y += 0.01;
-    //}
-    renderer.render( scene, camera );
-}
-animate();
 
 let isDragging = false;
-//let isRightClick = false;
-let previousMousePosition = {x : 0, y : 0};
+let isMoving = false;
+let currentTarget = null;
+let offset = new THREE.Vector3();
+let previousMousePosition = { x: 0, y: 0 };
+let mouseDownTime = 0;
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const planeIntersect = new THREE.Vector3();
+
 
 renderer.domElement.addEventListener('mousedown', (event) => {
-    isDragging = true;
     previousMousePosition = {
         x: event.clientX,
         y: event.clientY
     };
+    mouseDownTime = performance.now();
+    isDragging = true;
+
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+
+    const targets = [pallet];
+    if (cube) targets.push(cube);
+
+    const intersects = raycaster.intersectObjects(targets, true);
+    if (intersects.length > 0) {
+        currentTarget = intersects[0].object;
+        if (currentTarget === cube) {
+            raycaster.ray.intersectPlane(plane, planeIntersect);
+            offset.copy(planeIntersect).sub(cube.getWorldPosition(new THREE.Vector3()));
+        }
+    }
 });
 
 renderer.domElement.addEventListener('mouseup', () => {
     isDragging = false;
+    isMoving = false;
+    //selectedObject = null;
+    currentTarget = null;
+
 });
 renderer.domElement.addEventListener('mousemove',(event) =>{
-    if(!isDragging || !cube) return;
+    if(!isDragging || !currentTarget) return;
 
-    const deltaMove ={
+    const heldTime = performance.now() - mouseDownTime;
+
+    const deltaMove = {
         x : event.clientX - previousMousePosition.x,
         y : event.clientY - previousMousePosition.y
     };
 
-    const deltaRotatiomQuaternion = new THREE.Quaternion()
-        .setFromEuler(new THREE.Euler(
-            toRadians(deltaMove.y * 0.5),
-            toRadians(deltaMove.x * 0.5),
-            0,
-            'XYZ'
-        ));
-    
-        cube.quaternion.multiplyQuaternions(deltaRotatiomQuaternion, cube.quaternion);
+    if(heldTime > 200 && currentTarget === cube){
+        isMoving = true;
+    }
+
+    if(isMoving && currentTarget === cube){
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+
+        if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
+            //selectedObject.position.copy(planeIntersect.sub(offset));
+            //selectedObject.position.y = 10;
+            const local = pallet.worldToLocal(planeIntersect.clone().sub(offset));
+            cube.position.set(local.x, 10, local.z);
+        }
+    } else{
+        //const deltaRotationQuaternion = new THREE.Quaternion()
+            //.setFromEuler(new THREE.Euler(
+                //toRadians(deltaMove.y * 0.5),
+                //toRadians(deltaMove.x * 0.5),
+                //0,
+                //'XYZ'
+            //));
+        //cube.quaternion.multiplyQuaternions(deltaRotationQuaternion, cube.quaternion);
+        const target = currentTarget === pallet ? pallet : cube;
+        const rotationSpeed = 0.005;
+        target.rotation.y += deltaMove.x * rotationSpeed;
+        target.rotation.x += deltaMove.y * rotationSpeed;
+    }
 
     previousMousePosition = {
         x: event.clientX,
@@ -174,17 +205,27 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
 renderer.domElement.addEventListener('wheel', (event)=>{
     const zoomSpeed = 1.1;
     if (event.deltaY < 0){
-        camera.position.z /= zoomSpeed;
+        camera.position.multiplyScalar(1 / zoomSpeed);
     }else{
-        camera.position.z *= zoomSpeed;
+        camera.position.multiplyScalar(zoomSpeed);
     }
 
     camera.position.z = THREE.MathUtils.clamp(camera.position.z, 20, 300);
 });
 
-function toRadians(angle){
-    return angle * (Math.PI /180)
+function animate() {
+    requestAnimationFrame( animate );
+    //自動旋轉
+    //if(cube){
+        //cube.rotation.y += 0.01;
+    //}
+    renderer.render( scene, camera );
 }
+animate();
+
+//function toRadians(angle){
+    //return angle * (Math.PI /180)
+//}
 
 document.getElementById('shapeType').addEventListener('change', (e) => {
       const value = e.target.value;
@@ -199,9 +240,6 @@ document.getElementById('hasHole').addEventListener('change', (e) => {
 
 document.getElementById('generate').addEventListener('click', () => {
     const type = document.getElementById('shapeType').value;
-    //const width = parseFloat(document.getElementById('width').value);
-    //const height = parseFloat(document.getElementById('height').value);
-    //const depth = parseFloat(document.getElementById('depth').value);
     const color = document.getElementById('color').value;
     const hasHole = document.getElementById('hasHole').checked;
     const holeWidth = parseFloat(document.getElementById('holeWidth').value);
