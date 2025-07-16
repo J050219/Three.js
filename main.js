@@ -45,6 +45,40 @@ scene.add(container);
 
 const objects = [];
 
+function isOverlapping(newBox, ignore = null) {
+    const newBoxBounds = new THREE.Box3().setFromObject(newBox);
+    for (const obj of objects) {
+        if (obj === ignore) continue;
+        const box = new THREE.Box3().setFromObject(obj);
+        if (newBoxBounds.intersectsBox(box)) {
+            const minA = newBoxBounds.min;
+            const maxA = newBoxBounds.max;
+            const minB = box.min;
+            const maxB = box.max;
+            const vertical = maxA.y <= minB.y || minA.y >= maxB.y;
+            if (!vertical) return true;
+        }
+    }
+    return false;
+}
+
+function findRestingY(object) {
+    const clone = object.clone();
+    const box = new THREE.Box3().setFromObject(object);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2;
+    const maxY = container.position.y + container.geometry.parameters.height / 2 - size.y / 2;
+    while (y <= maxY) {
+        clone.position.y = y;
+        if (!isOverlapping(clone, object)) {
+            return y;
+        }
+        y += 0.5;
+    }
+    return object.position.y;
+}
+
 function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight) {
   
     const material = new THREE.MeshStandardMaterial({ color });
@@ -113,41 +147,50 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         mesh = new THREE.Mesh(geometry, material);
     }
 
-    mesh.userData.type = 'custom';
     const box = new THREE.Box3().setFromObject(mesh);
     const size = new THREE.Vector3();
     box.getSize(size);
-    const palletTopY = pallet.position.y + pallet.geometry.parameters.height / 2;
-    mesh.position.set(0, palletTopY + size.y / 2, 0);
-    scene.add(mesh);
-    objects.push(mesh);
-    mesh.userData.originalY = mesh.position.y;
+
+    const containerBox = new THREE.Box3().setFromObject(container);
+    const padding = 0.1; // 為避免靠太近
+    const step = 0.5; // 掃描精度
+
+    let placed = false;
+
+    for (let x = containerBox.min.x + size.x / 2 + padding; x <= containerBox.max.x - size.x / 2 - padding; x += step) {
+        for (let z = containerBox.min.z + size.z / 2 + padding; z <= containerBox.max.z - size.z / 2 - padding; z += step) {
+            let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2;
+            const maxY = containerBox.max.y - size.y / 2 - padding;
+
+            while (y <= maxY) {
+                mesh.position.set(x, y, z);
+                if (!isOverlapping(mesh)) {
+                    mesh.userData.type = 'custom';
+                    mesh.userData.originalY = y;
+                    scene.add(mesh);
+                    objects.push(mesh);
+                    placed = true;
+                    break;
+                }
+                y += 0.5;
+            }
+            if (placed) break;
+        }
+        if (placed) break;
+    }
 }
 
 let isDragging = false;
-//let isMoving = false;
 let currentTarget = null;
 let offset = new THREE.Vector3();
-//let previousMousePosition = { x: 0, y: 0 };
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
-//const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const planeIntersect = new THREE.Vector3();
-
-//let isRightMouse = false;
 
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 renderer.domElement.addEventListener('mousedown', (event) => {
-    //if (event.button === 2) {
-        //isDragging = true;
-        //isRightMouse = event.button === 2;
-        //previousMousePosition = {
-            //x: event.clientX,
-            //y: event.clientY
-        //};    
-        //if (isRightMouse) {
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
@@ -162,12 +205,13 @@ renderer.domElement.addEventListener('mousedown', (event) => {
 
     if (event.button === 0) {
         const jumpHeight = 10;
+        const originalY = findRestingY(currentTarget);
         const jumpUp = new TWEEN.Tween(currentTarget.position)
-            .to({ y: currentTarget.userData.originalY + jumpHeight }, 150)
+            .to({ y: originalY + jumpHeight }, 150)
             .easing(TWEEN.Easing.Quadratic.Out);
 
         const fallDown = new TWEEN.Tween(currentTarget.position)
-            .to({ y: currentTarget.userData.originalY }, 300)
+            .to({ y: originalY }, 300)
             .easing(TWEEN.Easing.Bounce.Out);
 
         jumpUp.chain(fallDown).start();
@@ -188,7 +232,6 @@ renderer.domElement.addEventListener('mouseup', () => {
 
 renderer.domElement.addEventListener('mousemove',(event) =>{
     if (!isDragging || !currentTarget) return;
-    
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
@@ -207,7 +250,11 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
         const max = containerBox.max.clone().sub(halfSize);
         newPos.x = THREE.MathUtils.clamp(newPos.x, min.x, max.x);
         newPos.z = THREE.MathUtils.clamp(newPos.z, min.z, max.z);
-        currentTarget.position.set(newPos.x, pallet.position.y + pallet.geometry.parameters.height / 2 + targetSize.y / 2, newPos.z);
+        const testBox = currentTarget.clone();
+        testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
+        if (!isOverlapping(testBox, currentTarget)) {
+            currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
+        }
     }
 });
 
@@ -265,4 +312,4 @@ document.getElementById('generate').addEventListener('click', () => {
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
 });
 
-createCube('cube', 20, 20, 20, '#00ff00', false, 0, 0);
+//createCube('cube', 20, 20, 20, '#00ff00', false, 0, 0);
