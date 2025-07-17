@@ -67,7 +67,15 @@
             <input id="holeHeight" type="number" placeholder="孔高 (Hole Height)" />
         </div>
         <button id="generate">產生物體</button>
+        <button id="recognizeParams">辨識參數</button>
     </div>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('recognizeParams').addEventListener('click', () => {
+          window.open('recognize.html', '_blank', 'width=700,height=600');
+        });
+      });
+    </script>
     <script type="module" src="/main.js"></script>
   </body>
 </html>

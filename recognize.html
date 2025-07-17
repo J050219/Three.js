@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>參數辨識</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; background: #111; color: white; text-align: center; }
+    video { margin-top: 20px; border: 2px solid #fff; }
+    button { margin-top: 20px; padding: 10px 20px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h2>使用攝影機辨識參數</h2>
+  <video id="video" width="640" height="480" autoplay playsinline muted></video>
+  <br />
+  <button id="start">開始辨識</button>
+
+  <script type="module">
+    import { createRecognizer } from './recognizer.js';
+
+    const startBtn = document.getElementById('start');
+    const videoEl = document.getElementById('video');
+    const recognize = await createRecognizer(videoEl);
+    //let recognize;
+    //async function init() {
+      //recognize = await createRecognizer(videoEl);
+    //}
+    //await init();
+
+    startBtn.addEventListener('click', async () => {
+      console.log('開始辨識...');
+      const result = await recognize();
+      if (result) {
+        console.log('辨識結果:', result);
+        alert('辨識結果：' + JSON.stringify(result, null, 2));
+      } else {
+        console.warn('辨識失敗');
+      }
+    });
+  </script>
+</body>
+</html>

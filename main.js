@@ -46,17 +46,37 @@ scene.add(container);
 const objects = [];
 
 function isOverlapping(newBox, ignore = null) {
-    const newBoxBounds = new THREE.Box3().setFromObject(newBox);
+    const newBoxBounds = [];
+    newBox.updateMatrixWorld(true);
+    newBox.traverse(child => {
+        if (child.isMesh) {
+            const box = new THREE.Box3().setFromObject(child);
+            newBoxBounds.push(box);
+        }
+    });
     for (const obj of objects) {
         if (obj === ignore) continue;
-        const box = new THREE.Box3().setFromObject(obj);
-        if (newBoxBounds.intersectsBox(box)) {
-            const minA = newBoxBounds.min;
-            const maxA = newBoxBounds.max;
-            const minB = box.min;
-            const maxB = box.max;
-            const vertical = maxA.y <= minB.y || minA.y >= maxB.y;
-            if (!vertical) return true;
+        obj.updateMatrixWorld(true);
+        const objBoxes = [];
+        obj.traverse(child => {
+            if (child.isMesh) {
+                const box = new THREE.Box3().setFromObject(child);
+                objBoxes.push(box);
+            }
+        });
+        //const box = new THREE.Box3().setFromObject(obj);
+        //if (newBoxBounds.intersectsBox(box)) {
+        for (const newBound of newBoxBounds) {
+            for (const box of objBoxes) {
+                if (newBound.intersectsBox(box)) {
+                    const minA = newBound.min;
+                    const maxA = newBound.max;
+                    const minB = box.min;
+                    const maxB = box.max;
+                    const vertical = maxA.y <= minB.y || minA.y >= maxB.y;
+                    if (!vertical) return true;
+                }
+            }
         }
     }
     return false;
@@ -80,19 +100,15 @@ function findRestingY(object) {
 }
 
 function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight) {
-  
     const material = new THREE.MeshStandardMaterial({ color });
     let mesh;
-
     if (type === 'cube') {
         const outer = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
         
         if (hasHole) {
             const inner = new THREE.Mesh(new THREE.BoxGeometry(holeWidth, holeHeight, depth + 2), material);
-            
             outer.updateMatrix();
             inner.updateMatrix();
-        
             try{
                 const result = CSG.subtract(outer, inner);
                 result.geometry.computeVertexNormals();
@@ -106,15 +122,13 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         }
     }else if (type === 'circle') {
         const outer = new THREE.Mesh(new THREE.SphereGeometry(width / 2, 32, 32), material);
-        
         if (hasHole) {
             const inner = new THREE.Mesh(new THREE.SphereGeometry(holeWidth / 2, 32, 32),material);
             outer.updateMatrix();
             inner.updateMatrix();
-
             try{
                 const result = CSG.subtract(outer, inner);
-                result.geometry,computeVertexNormals();
+                result.geometry.computeVertexNormals();
                 mesh = result;
             }catch(err){
                 console.error('CSG subtraction failed:',err);
@@ -124,46 +138,64 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
             mesh = outer;
         }
     } else if (type === 'lshape') {
-        const shape = new THREE.Shape();
-        shape.moveTo(0, 0);
-        shape.lineTo(0, height);
-        shape.lineTo(width * 0.4, height);
-        shape.lineTo(width * 0.6, height * 0.6);
-        shape.lineTo(width, height * 0.6);
-        shape.lineTo(width, 0);
-        shape.lineTo(0, 0);
+        const mat = material;
+
+        const verticalBox = new THREE.Mesh(
+            new THREE.BoxGeometry(width * 0.4, height, depth), mat
+        );
+        verticalBox.position.set(-width * 0.3, 0, 0);
+
+        const horizontalBox = new THREE.Mesh(
+            new THREE.BoxGeometry(width, height * 0.4, depth), mat
+        );
+        horizontalBox.position.set(0, -height * 0.3, 0);
+
+        const lGroup = new THREE.Group();
+        lGroup.add(verticalBox);
+        lGroup.add(horizontalBox);
+        mesh = lGroup;
 
         if (hasHole) {
-            const hole = new THREE.Path();
-            hole.moveTo(width / 2 - holeWidth / 2, height / 2 - holeHeight / 2);
-            hole.lineTo(width / 2 + holeWidth / 2, height / 2 - holeHeight / 2);
-            hole.lineTo(width / 2 + holeWidth / 2, height / 2 + holeHeight / 2);
-            hole.lineTo(width / 2 - holeWidth / 2, height / 2 + holeHeight / 2);
-            hole.lineTo(width / 2 - holeWidth / 2, height / 2 - holeHeight / 2);
-            shape.holes.push(hole);
+            const holeBox = new THREE.Mesh(
+                new THREE.BoxGeometry(holeWidth, holeHeight, depth + 2), mat
+            );
+            holeBox.position.set(0, 0, 0);
+            try {
+                lGroup.updateMatrixWorld(true);
+                holeBox.updateMatrix();
+                mesh = CSG.subtract(lGroup, holeBox);
+                mesh.geometry.computeVertexNormals();
+            } catch (err) {
+                console.error("CSG subtraction failed:", err);
+                mesh = lGroup;
+            }
         }
-
-        const geometry = new THREE.ExtrudeGeometry(shape,{depth, bevelEnabled: false});
-        mesh = new THREE.Mesh(geometry, material);
     }
-
     const box = new THREE.Box3().setFromObject(mesh);
     const size = new THREE.Vector3();
     box.getSize(size);
-
     const containerBox = new THREE.Box3().setFromObject(container);
-    const padding = 0.1; // 為避免靠太近
-    const step = 0.5; // 掃描精度
+    const padding = 0.1; 
+    const step = 0.5;
+    const leftX = containerBox.min.x + size.x / 2;
+    const backZ = containerBox.min.z + size.z / 2;
+    mesh.position.set(leftX, 0, backZ);
+    const deltaY = pallet.position.y + pallet.geometry.parameters.height / 2 - box.min.y;
+    mesh.position.y += deltaY;
 
+    mesh.userData.type = 'custom';
+    mesh.userData.originalY = mesh.position.y;
+    //scene.add(mesh);
+    //objects.push(mesh);
     let placed = false;
 
     for (let x = containerBox.min.x + size.x / 2 + padding; x <= containerBox.max.x - size.x / 2 - padding; x += step) {
         for (let z = containerBox.min.z + size.z / 2 + padding; z <= containerBox.max.z - size.z / 2 - padding; z += step) {
             let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2;
             const maxY = containerBox.max.y - size.y / 2 - padding;
-
             while (y <= maxY) {
                 mesh.position.set(x, y, z);
+                mesh.position.y = findRestingY(mesh);
                 if (!isOverlapping(mesh)) {
                     mesh.userData.type = 'custom';
                     mesh.userData.originalY = y;
@@ -183,7 +215,6 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
 let isDragging = false;
 let currentTarget = null;
 let offset = new THREE.Vector3();
-
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 const planeIntersect = new THREE.Vector3();
@@ -258,7 +289,6 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
     }
 });
 
-
 renderer.domElement.addEventListener('wheel', (event) => {
     const zoomSpeed = 1.1;
     if (event.deltaY < 0) {
@@ -311,5 +341,3 @@ document.getElementById('generate').addEventListener('click', () => {
     }
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
 });
-
-//createCube('cube', 20, 20, 20, '#00ff00', false, 0, 0);
