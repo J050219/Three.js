@@ -7,3 +7,4 @@ node_modules/
 *.whl
 __pycache__/
 *.txt
+models/

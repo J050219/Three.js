@@ -341,3 +341,35 @@ document.getElementById('generate').addEventListener('click', () => {
     }
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
 });
+
+const recognizeBtn = document.createElement('button');
+recognizeBtn.textContent = '辨識參數';
+document.getElementById('ui').appendChild(recognizeBtn);
+
+// 新增 video element（不顯示）
+const video = document.createElement('video');
+video.autoplay = true;
+video.width = 640;
+video.height = 480;
+video.style.display = 'none';
+document.body.appendChild(video);
+
+const recognize = await createRecognizer(video);
+
+// 按下辨識後自動建立模型
+recognizeBtn.addEventListener('click', () => {
+  recognize((result) => {
+    if (!result) return;
+
+    createCube(
+      result.type,
+      result.width,
+      result.height,
+      result.depth,
+      result.color,
+      result.hasHole,
+      result.holeWidth,
+      result.holeHeight
+    );
+  });
+});

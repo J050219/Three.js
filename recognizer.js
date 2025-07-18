@@ -7,11 +7,12 @@ export async function createRecognizer(videoElement) {
     canvas.width = 640;
     canvas.height = 480;
 
-    return async function recognize() {
+    return async function recognize(callback) {
         ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
         const imageData = canvas.toDataURL('image/jpg', 0.92);
         const link = document.createElement('a');
         link.href = imageData;
+        link.download = `snapshot_${Date.now()}.jpg`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -45,7 +46,7 @@ export async function createRecognizer(videoElement) {
             type = 'circle';
         else if(type.includes('L型') || type.includes('l型'))
             type = 'lshape';
-        return {
+        const result = {
             type,
             width,
             height,
@@ -55,5 +56,9 @@ export async function createRecognizer(videoElement) {
             holeWidth,
             holeHeight
         };
+        alert('✅ 辨識成功，自動產生模型中');
+        if (typeof callback === 'function') {
+            callback(result);
+        }
     };
 }
