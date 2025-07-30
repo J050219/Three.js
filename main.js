@@ -1,6 +1,7 @@
 import * as THREE from 'three'; 
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CSG } from 'three-csg-ts';
+import { createRecognizer } from './recognizer.js';
 import TWEEN from '@tweenjs/tween.js';
 
 const scene = new THREE.Scene();
@@ -28,8 +29,6 @@ const palletGeometry = new THREE.BoxGeometry(100, 10, 100);
 const palletMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
 const pallet = new THREE.Mesh(palletGeometry, palletMaterial);
 pallet.position.y = -5;
-//pallet.rotation.set(0, 0, 0);
-//pallet.userData.type = 'pallet';
 scene.add(pallet);
 
 const containerGeometry = new THREE.BoxGeometry(100, 100, 100);
@@ -64,8 +63,6 @@ function isOverlapping(newBox, ignore = null) {
                 objBoxes.push(box);
             }
         });
-        //const box = new THREE.Box3().setFromObject(obj);
-        //if (newBoxBounds.intersectsBox(box)) {
         for (const newBound of newBoxBounds) {
             for (const box of objBoxes) {
                 if (newBound.intersectsBox(box)) {
@@ -185,8 +182,6 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
 
     mesh.userData.type = 'custom';
     mesh.userData.originalY = mesh.position.y;
-    //scene.add(mesh);
-    //objects.push(mesh);
     let placed = false;
 
     for (let x = containerBox.min.x + size.x / 2 + padding; x <= containerBox.max.x - size.x / 2 - padding; x += step) {
@@ -220,7 +215,6 @@ const mouse = new THREE.Vector2();
 const planeIntersect = new THREE.Vector3();
 
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
-
 renderer.domElement.addEventListener('mousedown', (event) => {
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -244,7 +238,6 @@ renderer.domElement.addEventListener('mousedown', (event) => {
         const fallDown = new TWEEN.Tween(currentTarget.position)
             .to({ y: originalY }, 300)
             .easing(TWEEN.Easing.Bounce.Out);
-
         jumpUp.chain(fallDown).start();
     }
 
@@ -275,8 +268,6 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
         const targetSize = new THREE.Vector3();
         targetBox.getSize(targetSize);
         const halfSize = targetSize.clone().multiplyScalar(0.5);
-
-        // 限制在 container 內
         const min = containerBox.min.clone().add(halfSize);
         const max = containerBox.max.clone().sub(halfSize);
         newPos.x = THREE.MathUtils.clamp(newPos.x, min.x, max.x);
@@ -342,11 +333,6 @@ document.getElementById('generate').addEventListener('click', () => {
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
 });
 
-const recognizeBtn = document.createElement('button');
-recognizeBtn.textContent = '辨識參數';
-document.getElementById('ui').appendChild(recognizeBtn);
-
-// 新增 video element（不顯示）
 const video = document.createElement('video');
 video.autoplay = true;
 video.width = 640;
@@ -356,20 +342,39 @@ document.body.appendChild(video);
 
 const recognize = await createRecognizer(video);
 
-// 按下辨識後自動建立模型
-recognizeBtn.addEventListener('click', () => {
-  recognize((result) => {
-    if (!result) return;
+//const recognizeBtn = document.getElementById('recognizeBtn');
+//recognizeBtn.addEventListener('click', async () => {
+  //recognizeBtn.innerText = '辨識中...';
 
-    createCube(
-      result.type,
-      result.width,
-      result.height,
-      result.depth,
-      result.color,
-      result.hasHole,
-      result.holeWidth,
-      result.holeHeight
-    );
-  });
-});
+  //await recognize((data) => {
+    //if (!data) return;
+
+    //const {
+    //  type, width, height, depth,
+    //  //color, hasHole, holeWidth, holeHeight
+    //} = data;
+
+    //document.getElementById('shapeType').value = type;
+    //document.getElementById('shapeType').dispatchEvent(new Event('change'));
+    //document.getElementById('color').value = color;
+    //document.getElementById('hasHole').checked = hasHole;
+    //document.getElementById('hasHole').dispatchEvent(new Event('change'));
+
+    //if (type === 'cube') {
+      //document.getElementById('boxWidth').value = width;
+      //document.getElementById('boxHeight').value = height;
+      //document.getElementById('boxDepth').value = depth;
+    //} else if (type === 'circle') {
+      //document.getElementById('sphereWidth').value = width;
+    //} else if (type === 'lshape') {
+      //document.getElementById('customWidth').value = width;
+      //document.getElementById('customHeight').value = height;
+      //document.getElementById('customDepth').value = depth;
+    //}
+
+    //document.getElementById('holeWidth').value = holeWidth;
+    //document.getElementById('holeHeight').value = holeHeight;
+
+    //recognizeBtn.innerText = '辨識參數'; // 還原按鈕文字
+  //});
+//});

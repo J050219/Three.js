@@ -1,7 +1,18 @@
 export async function createRecognizer(videoElement) {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-    videoElement.srcObject = stream;
-    
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }});
+        videoElement.srcObject = stream;
+        await new Promise((resolve) => {
+            videoElement.onloadedmetadata = () => {
+                videoElement.play();
+                resolve();
+            };
+        });
+    } catch (err) {
+        console.error('無法存取攝影機:', err);
+        alert('無法存取攝影機，請檢查權限設定');
+        return () => {};
+    }
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     canvas.width = 640;
@@ -10,55 +21,44 @@ export async function createRecognizer(videoElement) {
     return async function recognize(callback) {
         ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
         const imageData = canvas.toDataURL('image/jpg', 0.92);
-        const link = document.createElement('a');
-        link.href = imageData;
-        link.download = `snapshot_${Date.now()}.jpg`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
         alert('已拍攝圖片，正在辨識...');
-        const res = await fetch('http://localhost:5000/ovis-recognize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: imageData })
-        });
-        const data = await res.json();
-        if (!data || !data.text) return null;
+        try {
+            const res = await fetch('http://192.168.178.151:5678/webhook/mcp', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: imageData })
+            });
+            const resJson = await res.json();
+            if (resJson.error) {
+                console.error('伺服器回應錯誤:', resJson.error);
+                return;
+            }
 
-        const text = data.text;
-        console.log('辨識結果:', text);
+            const text = resJson.text;
+            console.log('辨識結果:', text);
+        
+            const extract = (regex) => parseFloat((text.match(regex) || [])[1]);
 
-        const typeMatch = text.match(/(cube|circle|lshape|立方體|球體|L型)/i);
-        const width = parseFloat((text.match(/寬\s*(\d+)/) || [])[1]);
-        const height = parseFloat((text.match(/高\s*(\d+)/) || [])[1]);
-        const depth = parseFloat((text.match(/深\s*(\d+)/) || [])[1]);
-        const color = (text.match(/色\s*(#?[0-9a-fA-F]{6})/) || [])[1] || '#00ff00';
-        const hasHole = /有洞/.test(text);
-        const holeWidth = parseFloat((text.match(/洞寬\s*(\d+)/) || [])[1]) || 0;
-        const holeHeight = parseFloat((text.match(/洞高\s*(\d+)/) || [])[1]) || 0;
+            const result = {
+                type: /cube|立方/i.test(text) ? "cube" :
+                      /circle|球/i.test(text) ? "circle" :
+                      /lshape|不規則|L型/i.test(text) ? "lshape" : "cube",
+                width: extract(/(?:寬|width)\s*(\d+)/i),
+                height: extract(/(?:高|height)\s*(\d+)/i),
+                depth: extract(/(?:深|depth)\s*(\d+)/i),
+                color: (text.match(/色\s*(#?[0-9a-fA-F]{6})/) || [])[1] || '#00ff00',
+                hasHole: /有洞/.test(text),
+                holeWidth: extract(/(?:洞寬|holeWidth)\s*(\d+)/i),
+                holeHeight: extract(/(?:洞高|holeHeight)\s*(\d+)/i)
+            };
 
-        if (!typeMatch || isNaN(width) || isNaN(height) || isNaN(depth)) return null;
-
-        let type = typeMatch[1].toLowerCase();
-        if(type.includes('立方體'))
-            type = 'cube';
-        else if(type.includes('球體'))
-            type = 'circle';
-        else if(type.includes('L型') || type.includes('l型'))
-            type = 'lshape';
-        const result = {
-            type,
-            width,
-            height,
-            depth,
-            color,
-            hasHole,
-            holeWidth,
-            holeHeight
-        };
-        alert('✅ 辨識成功，自動產生模型中');
-        if (typeof callback === 'function') {
-            callback(result);
+            alert('✅ 辨識成功，自動產生模型中');
+            if (typeof callback === 'function') {
+                callback(result);
+            }
+        } catch (err) {
+            console.error('辨識錯誤:', err);
+            alert('發生錯誤');
         }
     };
 }
