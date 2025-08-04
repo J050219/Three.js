@@ -15,10 +15,10 @@
         font-family: sans-serif;
         z-index: 10;
       }
-      .parm-group {
+      .param-group {
         margin-bottom: 10px;
       }
-      .parm-group input {
+      .param-group input {
         margin: 2px 0 ;
         display: block;
         width: 100px;
@@ -82,26 +82,67 @@
 
     </div>
 
-    <video id="video" autoplay muted playsinline></video>
+    <img id="video" src="http://127.0.0.1:5000/get-camera-frame" alt="攝影機畫面" />
+
 
     <script type="module">
       import { createRecognizer } from './recognizer.js';
-      //import { createCube } from './main.js';
-      const video = document.getElementById('video');
-      const recognize = await createRecognizer(video);
-      document.getElementById('recognizeParams').addEventListener('click', async () => {
-        await recognize((data) => {
-          if (!data) return;
-          const {
-            type, width, height, depth,
-            color, hasHole, holeWidth, holeHeight
-          } = data;
+      (async () => {
+        const video = document.getElementById('video');
+        const recognize = await createRecognizer(video);
 
-          document.getElementById('shapeType').value = type;
-          document.getElementById('shapeType').dispatchEvent(new Event('change'));
-          document.getElementById('color').value = color;
-          document.getElementById('hasHole').checked = hasHole;
-          document.getElementById('hasHole').dispatchEvent(new Event('change'));
+        const colorMap = {
+          '紅': '#ff0000',
+          '紅色': '#ff0000',
+          '藍': '#0000ff',
+          '藍色': '#0000ff',
+          '綠': '#00ff00',
+          '綠色': '#00ff00',
+          '白': '#ffffff',
+          '白色': '#ffffff',
+          '黑': '#000000',
+          '黑色': '#000000',
+          '紫': '#800080',
+          '紫色': '#800080',
+          '黃': '#ffff00',
+          '黃色': '#ffff00'
+      };
+
+        // 🔄 根據 shapeType 切換欄位
+        document.getElementById('shapeType').addEventListener('change', () => {
+          const type = document.getElementById('shapeType').value;
+          document.getElementById('boxParams').style.display = type === 'cube' ? 'block' : 'none';
+          document.getElementById('sphereParams').style.display = type === 'circle' ? 'block' : 'none';
+          document.getElementById('customParams').style.display = type === 'lshape' ? 'block' : 'none';
+        });
+
+        // 🔄 根據是否簍空切換孔洞欄位
+        document.getElementById('hasHole').addEventListener('change', () => {
+          const checked = document.getElementById('hasHole').checked;
+          document.getElementById('holeInput').style.display = checked ? 'block' : 'none';
+        });
+
+        document.getElementById('recognizeBtn').addEventListener('click', async () => {
+          await recognize((data) => {
+            if (!data) return;
+            const {
+              type, width, height, depth,
+              color, hasHole, holeWidth, holeHeight
+            } = data;
+
+            document.getElementById('shapeType').value = type;
+            document.getElementById('shapeType').dispatchEvent(new Event('change'));
+
+            let hexColor = color;
+            if (!/^#?[0-9a-fA-F]{6}$/.test(color)) {
+              hexColor = colorMap[color.trim()] || '#00ff00';
+            }
+            if (!hexColor.startsWith('#')) {
+              hexColor = '#' + hexColor;
+            }
+            document.getElementById('color').value = hexColor;
+            document.getElementById('hasHole').checked = hasHole;
+            document.getElementById('hasHole').dispatchEvent(new Event('change'));
           //document.getElementById('holeInput').style.display = hasHole ? 'block' : 'none';
 
           if (type === 'cube') {
@@ -120,6 +161,7 @@
           document.getElementById('holeHeight').value = holeHeight;
         });
       });
+    })();
     </script>
     <script type="module" src="/main.js"></script>
   </body>
