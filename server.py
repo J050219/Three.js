@@ -10,7 +10,9 @@ CORS(app)
 os.makedirs("captured_images", exist_ok=True)
 
 camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-
+if not camera.isOpened():
+    print("❌ 無法開啟攝影機")
+    
 def encode_image_to_base64(image_path):
     with open(image_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode('utf-8')

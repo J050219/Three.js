@@ -16,7 +16,17 @@ def extract_params():
         print("❌ 無辨識結果")
         return None
     text = res_json["text"]
+    
+    if isinstance(res_json, list) and "response" in res_json[0]:
+        text = res_json[0]["response"]
+    elif isinstance(res_json, dict) and "text" in res_json:
+        text = res_json["text"]
+    else:
+        print("❌ 無辨識結果")
+        return None
+    
     print("📝 辨識結果：", text)
+
     def extract(regex):
         match = re.search(regex, text)
         return float(match.group(1)) if match else 20
@@ -66,42 +76,38 @@ def extract_params():
     #print("🔘 偵測到使用者已點擊按鈕")
     #time.sleep(2)
 
-#def capture_image_from_camera():
-    #save_dir = "captured_images"
-    #os.makedirs(save_dir, exist_ok=True)
-    #save_path = os.path.join(save_dir, "img.jpg")
-    
-    #cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    #if not cap.isOpened():
-        #print("❌ 無法開啟攝影機")
-        #return None
-    #ret, frame = cap.read()
-    #cap.release()
-    #if not ret:
-        #print("❌ 無法讀取攝影機畫面")
-        #return None
-    #cv2.imwrite(save_path, frame)
-    #print(f"✅ 擷取成功：{save_path}")
-    #with open(save_path, "rb") as img_file:
-        #image_base64 = base64.b64encode(img_file.read()).decode('utf-8')
-    #return image_base64
 
 def fill_form_with_selenium(driver, data):
     WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "shapeType")))
     shape_select = Select(driver.find_element(By.ID, "shapeType"))
     shape_select.select_by_value(data["type"])
-    time.sleep(1)  # 等待選擇器更新
-    driver.find_element(By.ID, "boxWidth").send_keys(str(data["width"]))
-    driver.find_element(By.ID, "boxHeight").send_keys(str(data["height"]))
-    driver.find_element(By.ID, "boxDepth").send_keys(str(data["depth"]))
+    time.sleep(1) 
+    if data["type"] == "cube":
+        WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "boxWidth")))
+        driver.find_element(By.ID, "boxWidth").send_keys(str(data["width"]))
+        driver.find_element(By.ID, "boxHeight").send_keys(str(data["height"]))
+        driver.find_element(By.ID, "boxDepth").send_keys(str(data["depth"]))
+    elif data["type"] == "circle":
+        WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "sphereWidth")))
+        driver.find_element(By.ID, "sphereWidth").send_keys(str(data["width"]))
+    elif data["type"] == "lshape":
+        WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "customWidth")))
+        driver.find_element(By.ID, "customWidth").send_keys(str(data["width"]))
+        driver.find_element(By.ID, "customHeight").send_keys(str(data["height"]))
+        driver.find_element(By.ID, "customDepth").send_keys(str(data["depth"]))
+
     driver.find_element(By.ID, "color").clear()
     driver.find_element(By.ID, "color").send_keys(data["color"])
-    if data["hasHole"]:
+
+    if data.get("hasHole"):
         checkbox = driver.find_element(By.ID, "hasHole")
         if not checkbox.is_selected():
             checkbox.click()
+        WebDriverWait(driver, 3).until(EC.visibility_of_element_located((By.ID, "holeWidth")))
         driver.find_element(By.ID, "holeWidth").send_keys(str(data["holeWidth"]))
         driver.find_element(By.ID, "holeHeight").send_keys(str(data["holeHeight"]))
+
+ 
     driver.find_element(By.ID, "generate").click()
     print("✅ 已將辨識結果填入並產生模型")
 
