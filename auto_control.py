@@ -53,18 +53,20 @@ def extract_params():
 
 def wait_for_recognize_button(driver):
     print("🕓 等待點擊辨識參數按鈕...")
-    
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "recognizeBtn")))
     while True:
-        #try:
-            #WebDriverWait(driver, 2).until(EC.alert_is_present())
+        try:
+            WebDriverWait(driver, 0.1).until(EC.alert_is_present())
+            driver.switch_to.alert.accept()
+            continue
             #alert = driver.switch_to.alert
             #print(f"⚠️ 偵測到警告視窗：{alert.text}")
             #alert.accept()
             #print("✅ 警告視窗已關閉")
-        #except:
-            #pass
+        except:
+            pass
 
-        btn = driver.find_element(By.ID, "recognizeBtn")
+            btn = driver.find_element(By.ID, "recognizeBtn")
         #clicked = btn.get_attribute("data-clicked")
         #if clicked == "true":
         #print("🔘 偵測到使用者已按下按鈕")
@@ -74,7 +76,7 @@ def wait_for_recognize_button(driver):
         #    print(f"❌ 找不到按鈕或屬性，錯誤：{e}")
         if btn.get_attribute("data-clicked") == "true":
             driver.execute_script("arguments[0].setAttribute('data-clicked','false');", btn)
-            break
+            return
         time.sleep(1)
 
 def fill_form_with_selenium(driver, data):
