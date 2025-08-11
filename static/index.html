@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <title>產生物體</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <script async src="https://unpkg.com/es-module-shims@1/dist/es-module-shims.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/examples/jsm/controls/OrbitControls.js": "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js",
+        "three-csg-ts": "https://cdn.jsdelivr.net/gh/manley520/three-csg-ts@v2.0.6/build/index.module.js",
+        "@tweenjs/tween.js": "https://cdn.jsdelivr.net/npm/@tweenjs/tween.js@18.6.4/dist/tween.esm.js"
+      }
+    }
+    </script>
+
+    <style>
+      body { margin: 0; overflow: hidden; background: black; }
+      #ui {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 12px;
+        border-radius: 8px;
+        font-family: sans-serif;
+        z-index: 10;
+      }
+      .param-group {
+        margin-bottom: 10px;
+      }
+      .param-group input {
+        margin: 2px 0 ;
+        display: block;
+        width: 100px;
+      }
+      label { display: block; margin: 5px 0; }
+      input[type="number"] { width: 80px; }
+      #video {
+        position: absolute;
+        bottom: 10px;
+        right: 10px;
+        width: 200px;
+        height: 150px;
+        border: 2px solid #00ff00;
+        background-color: black;
+        z-index: 5;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+        <label>
+            選擇圖形：
+            <select id="shapeType">
+                <option value="cube">立方體</option>
+                <option value="circle">球體</option>
+                <option value="lshape">不規則圖形</option>
+            </select>
+        </label>
+        <div id="boxParams" class="param-group">
+            <input id="boxWidth" type="number" placeholder="寬 (Width)" />
+            <input id="boxHeight" type="number" placeholder="高 (Height)" />
+            <input id="boxDepth" type="number" placeholder="深 (Depth)" />
+        </div>
+
+        <div id="sphereParams" class="param-group" style="display:none;">
+            <input id="sphereWidth" type="number" placeholder="直徑 (Diameter)" />
+        </div>
+
+        <div id="customParams" class="param-group" style="display:none;">
+            <input id="customWidth" type="number" placeholder="寬 (Width)" />
+            <input id="customHeight" type="number" placeholder="高 (Height)" />
+            <input id="customDepth" type="number" placeholder="厚度 (Depth)" />
+        </div>
+
+        <label>
+            顏色：
+            <input id="color" type="color" value="#00ff00" />
+        </label>
+
+        <label>
+            <input type="checkbox" id="hasHole" /> 是否簍空
+        </label>
+
+        <div id="holeInput" style="display:none;">
+            <input id="holeWidth" type="number" placeholder="孔寬 (Hole Width)" />
+            <input id="holeHeight" type="number" placeholder="孔高 (Hole Height)" />
+        </div>
+        <button id="generate">產生物體</button>
+        <button id="recognizeBtn" onclick="this.setAttribute('data-clicked', 'true')">辨識參數</button>
+
+    </div>
+
+    <img id="video" src="http://127.0.0.1:5000/get-camera-frame" alt="攝影機畫面" />
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

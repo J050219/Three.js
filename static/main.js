@@ -1,8 +1,41 @@
 import * as THREE from 'three'; 
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { CSG } from 'three-csg-ts';
+//import { CSG } from 'three-csg-ts';
+import * as ThreeCSG from 'three-csg-ts';
 import { createRecognizer } from './recognizer.js';
 import TWEEN from '@tweenjs/tween.js';
+
+/* const colorMap = {
+    "紅色": "#ff0000",
+    "綠色": "#00ff00",
+    "藍色": "#0000ff",
+    "黃色": "#ffff00",
+    "紫色": "#800080",
+    "黑色": "#000000",
+    "白色": "#ffffff",
+    "橘色": "#ffa500",
+    "灰色": "#808080",
+    "粉紅色": "#ffc0cb"
+};
+ */
+function normalizeColor(input) {
+    const map = {
+        "紅色": "#ff0000",
+        "綠色": "#00ff00",
+        "藍色": "#0000ff",
+        "黃色": "#ffff00",
+        "紫色": "#800080",
+        "黑色": "#000000",
+        "白色": "#ffffff",
+        "橘色": "#ffa500",
+        "灰色": "#808080",
+        "粉紅色": "#ffc0cb"
+    };
+    if (!input) return '#00ff00';
+    if (input.startsWith('#')) return input;
+    const hex = map[input.trim()];
+    return hex && /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#00ff00';
+}
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -10,11 +43,13 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-camera.position.set(0, 150, 150);
-camera.lookAt(0, 0, 0);
+camera.position.set(150, 150, 150);
+camera.lookAt(0, 45, 0);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+//controls.target.set(0, 45, 0); // ✅ 鎖定容器中心
+//controls.update();
 controls.dampingFactor = 0.05;
 controls.maxPolarAngle = Math.PI / 2;
 controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
@@ -35,7 +70,7 @@ const containerGeometry = new THREE.BoxGeometry(100, 100, 100);
 const containerMaterial = new THREE.MeshStandardMaterial({
     color: 0x00ffff,
     transparent: true,
-    opacity: 0.2,
+    opacity: 0.4,
     side: THREE.DoubleSide
 });
 const container = new THREE.Mesh(containerGeometry, containerMaterial);
@@ -43,6 +78,18 @@ container.position.y = 45;
 scene.add(container);
 
 const objects = [];
+
+function clearFormFields() {
+    const fields = ['boxWidth', 'boxHeight', 'boxDepth', 'sphereWidth', 'customWidth', 'customHeight', 'customDepth', 'holeWidth', 'holeHeight'];
+    fields.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    document.getElementById('shapeType').value = 'cube';
+    document.getElementById('color').value = '#00ff00';
+    document.getElementById('hasHole').checked = false;
+    document.getElementById('holeInput').style.display = 'none';
+    document.getElementById('boxParams').style.display = 'none';
+    document.getElementById('sphereParams').style.display = 'none';
+    document.getElementById('customParams').style.display = 'none';
+}
 
 function isOverlapping(newBox, ignore = null) {
     const newBoxBounds = [];
@@ -96,8 +143,12 @@ function findRestingY(object) {
     return object.position.y;
 }
 
+function applyColorToMaterial(color) {
+    return new THREE.MeshStandardMaterial({ color: new THREE.Color(normalizeColor(color)) });
+}
+
 function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight) {
-    const material = new THREE.MeshStandardMaterial({ color });
+    const material = applyColorToMaterial(color);
     let mesh;
     if (type === 'cube') {
         const outer = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
@@ -109,6 +160,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
             try{
                 const result = CSG.subtract(outer, inner);
                 result.geometry.computeVertexNormals();
+                result.material = material;
                 mesh = result;
             }catch(err){
                 console.error('CSG subtraction failed:',err);
@@ -126,6 +178,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
             try{
                 const result = CSG.subtract(outer, inner);
                 result.geometry.computeVertexNormals();
+                result.material = material;
                 mesh = result;
             }catch(err){
                 console.error('CSG subtraction failed:',err);
@@ -162,6 +215,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
                 holeBox.updateMatrix();
                 mesh = CSG.subtract(lGroup, holeBox);
                 mesh.geometry.computeVertexNormals();
+                mesh.material = material;
             } catch (err) {
                 console.error("CSG subtraction failed:", err);
                 mesh = lGroup;
@@ -290,14 +344,6 @@ renderer.domElement.addEventListener('wheel', (event) => {
     camera.position.z = THREE.MathUtils.clamp(camera.position.z, 20, 300);
 });
 
-function animate(time) {
-    requestAnimationFrame( animate );
-    controls.update();
-    TWEEN.update(time);
-    renderer.render( scene, camera );
-}
-animate();
-
 document.getElementById('shapeType').addEventListener('change', (e) => {
     const value = e.target.value;
     document.getElementById('boxParams').style.display = (value === 'cube') ? 'block' : 'none';
@@ -311,10 +357,10 @@ document.getElementById('hasHole').addEventListener('change', (e) => {
 
 document.getElementById('generate').addEventListener('click', () => {
     const type = document.getElementById('shapeType').value;
-    const color = document.getElementById('color').value;
+    const color = normalizeColor(document.getElementById('color').value);
     const hasHole = document.getElementById('hasHole').checked;
-    const holeWidth = parseFloat(document.getElementById('holeWidth').value);
-    const holeHeight = parseFloat(document.getElementById('holeHeight').value);
+    const holeWidth = parseFloat(document.getElementById('holeWidth').value || 0);
+    const holeHeight = parseFloat(document.getElementById('holeHeight').value || 0);
 
     let width = 20, height = 20, depth = 20;
     if (type === 'cube') {
@@ -331,13 +377,80 @@ document.getElementById('generate').addEventListener('click', () => {
         depth = parseFloat(document.getElementById('customDepth').value || 20);
     }
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
+    clearFormFields();
+    document.getElementById('color').value = '#00ff00';
+    document.getElementById('hasHole').checked = false;
+    document.getElementById('holeInput').style.display = 'none';
+    document.getElementById('boxParams').style.display = 'none';
+    document.getElementById('sphereParams').style.display = 'none';
+    document.getElementById('customParams').style.display = 'none';
+
+    ['boxWidth', 'boxHeight', 'boxDepth',
+     'sphereWidth',
+     'customWidth', 'customHeight', 'customDepth',
+     'holeWidth', 'holeHeight'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+
+    document.getElementById('shapeType').value = 'cube';
 });
+function animate(time) {
+    requestAnimationFrame( animate );
+    controls.update();
+    TWEEN.update(time);
+    renderer.render( scene, camera );
+}
+animate();
+(async () => {
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.width = 640;
+    video.height = 480;
+    video.style.display = 'none';
+    document.body.appendChild(video);
+    const recognize = await createRecognizer(video);
 
-const video = document.createElement('video');
-video.autoplay = true;
-video.width = 640;
-video.height = 480;
-video.style.display = 'none';
-document.body.appendChild(video);
+    document.getElementById('recognizeBtn').addEventListener('click', () => {
+        recognize((result) => {
+            const set = (id, val) => {
+                const el = document.getElementById(id);
+                if (el && val !== undefined && val !== null && val !== '') {
+                    el.value = val;
+                    if (id === 'color') {
+                        el.dispatchEvent(new Event('input'));
+                    }
+                }
+            };
 
-const recognize = await createRecognizer(video);
+            document.getElementById('shapeType').value = result.type;
+            document.getElementById('shapeType').dispatchEvent(new Event('change'));
+
+            set("color", result.color); // ✅ 這裡已修正，不再重複 normalizeColor()
+
+            if (result.type === "cube") {
+                set("boxWidth", result.width);
+                set("boxHeight", result.height);
+                set("boxDepth", result.depth);
+            } else if (result.type === "circle") {
+                set("sphereWidth", result.width);
+            } else if (result.type === "lshape") {
+                set("customWidth", result.width);
+                set("customHeight", result.height);
+                set("customDepth", result.depth);
+            }
+
+            document.getElementById("hasHole").checked = result.hasHole;
+            if (result.hasHole) {
+                set("holeWidth", result.holeWidth);
+                set("holeHeight", result.holeHeight);
+            } else {
+                document.getElementById('holeInput').style.display = 'none';
+            }
+            setTimeout(() => {
+                document.getElementById("generate").click();
+                setTimeout(clearFormFields, 500);
+            }, 100);
+        });
+    });
+})();

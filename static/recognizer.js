@@ -11,14 +11,13 @@ export async function createRecognizer(videoElement) {
     return async function recognize(callback) {
         alert('已拍攝圖片，正在辨識...');
         try {
-            const res = await fetch("/ovis-recognize-from-camera", { method: 'POST' });
+            const res = await fetch("http://localhost:5000/ovis-recognize-from-camera", { method: 'POST' });
             const resJson = await res.json();
             if (resJson.error) {
                 alert("❌ 辨識失敗：" + resJson.error);
                 console.error('伺服器回應錯誤:', resJson.error);
                 return;
             }
-
             const text = resJson.text;
             console.log('辨識結果:', text);
             window.__recognizeResult = text;
@@ -38,6 +37,7 @@ export async function createRecognizer(videoElement) {
             };
             const colorRaw = (text.match(/(紅|綠|藍|黃|紫|白|黑)(色)?/) || [])[0] || '綠色';
             const color = colorMap[colorRaw] || '#00ff00';
+            
             const result = {
                 type: /cube|立方/i.test(text) ? "cube" :
                       /circle|球/i.test(text) ? "circle" :
@@ -51,7 +51,7 @@ export async function createRecognizer(videoElement) {
                 holeHeight: extract(/(?:洞高|holeHeight)[^\d]{0,3}(\d+)/i)
             };
             alert('✅ 辨識成功，自動產生模型中');
-            
+
             if (typeof callback === 'function') callback(result);
         } catch (err) {
             console.error('辨識錯誤:', err);
