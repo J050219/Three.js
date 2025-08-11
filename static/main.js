@@ -5,6 +5,8 @@ import * as ThreeCSG from 'three-csg-ts';
 import { createRecognizer } from './recognizer.js';
 import TWEEN from '@tweenjs/tween.js';
 
+const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
+
 /* const colorMap = {
     "紅色": "#ff0000",
     "綠色": "#00ff00",
@@ -40,6 +42,7 @@ function normalizeColor(input) {
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
@@ -48,8 +51,6 @@ camera.lookAt(0, 45, 0);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-//controls.target.set(0, 45, 0); // ✅ 鎖定容器中心
-//controls.update();
 controls.dampingFactor = 0.05;
 controls.maxPolarAngle = Math.PI / 2;
 controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
@@ -75,6 +76,11 @@ const containerMaterial = new THREE.MeshStandardMaterial({
 });
 const container = new THREE.Mesh(containerGeometry, containerMaterial);
 container.position.y = 45;
+const containerEdges = new THREE.LineSegments(
+  new THREE.EdgesGeometry(containerGeometry),
+  new THREE.LineBasicMaterial({ color: 0x00ffff })
+);
+container.add(containerEdges);
 scene.add(container);
 
 const objects = [];
@@ -378,7 +384,7 @@ document.getElementById('generate').addEventListener('click', () => {
     }
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
     clearFormFields();
-    document.getElementById('color').value = '#00ff00';
+    /* document.getElementById('color').value = '#00ff00';
     document.getElementById('hasHole').checked = false;
     document.getElementById('holeInput').style.display = 'none';
     document.getElementById('boxParams').style.display = 'none';
@@ -393,7 +399,7 @@ document.getElementById('generate').addEventListener('click', () => {
         if (el) el.value = '';
     });
 
-    document.getElementById('shapeType').value = 'cube';
+    document.getElementById('shapeType').value = 'cube'; */
 });
 function animate(time) {
     requestAnimationFrame( animate );
@@ -402,6 +408,13 @@ function animate(time) {
     renderer.render( scene, camera );
 }
 animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
 (async () => {
     const video = document.createElement('video');
     video.autoplay = true;

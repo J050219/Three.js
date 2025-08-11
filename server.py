@@ -1,14 +1,38 @@
-from flask import Flask, jsonify, request, Response, send_from_directory
+from flask import Flask, jsonify, request, Response, abort, send_from_directory
 import cv2
 import base64
 import requests
 import os
 from flask_cors import CORS
 
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
 os.makedirs("captured_images", exist_ok=True)
 
+@app.route('/static/node_modules/<path:filename>')
+def static_node_modules(filename):
+    base = os.path.join(app.static_folder, 'node_modules')
+    full = os.path.join(base, filename)
+
+    # 1) 目錄 → 傳回 index.js
+    if os.path.isdir(full):
+        idx = os.path.join(filename, 'index.js')
+        if os.path.exists(os.path.join(base, idx)):
+            return send_from_directory(base, idx)
+
+    # 2) 檔案剛好存在 → 直接回
+    if os.path.exists(full):
+        return send_from_directory(base, filename)
+
+    # 3) 沒副檔名 → 依序補 .js / .mjs
+    root, ext = os.path.splitext(full)
+    if ext == '':
+        for suf in ('.js', '.mjs'):
+            cand = root + suf
+            if os.path.exists(cand):
+                return send_from_directory(base, filename + suf)
+
+    return abort(404)
 camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 if not camera.isOpened():
     print("❌ 無法開啟攝影機")
