@@ -75,7 +75,6 @@ function addToLibrary(params) {
   renderLibrary();
 }
 
-/* 點清單的「放到場景」 */
 document.addEventListener('click', (e) => {
   const btn = e.target.closest?.('.use-item');
   if (!btn) return;
@@ -85,19 +84,6 @@ document.addEventListener('click', (e) => {
   createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight);
 });
 
-/* const colorMap = {
-    "紅色": "#ff0000",
-    "綠色": "#00ff00",
-    "藍色": "#0000ff",
-    "黃色": "#ffff00",
-    "紫色": "#800080",
-    "黑色": "#000000",
-    "白色": "#ffffff",
-    "橘色": "#ffa500",
-    "灰色": "#808080",
-    "粉紅色": "#ffc0cb"
-};
- */
 function normalizeColor(input) {
     const map = {
         "紅色": "#ff0000",
@@ -163,16 +149,41 @@ scene.add(container);
 
 const objects = [];
 
+function updateParamVisibility(type = document.getElementById('shapeType')?.value) {
+  const box    = document.getElementById('boxParams');
+  const sphere = document.getElementById('sphereParams');
+  const custom = document.getElementById('customParams');
+  const hole   = document.getElementById('holeInput');
+  if (!box || !sphere || !custom || !hole) return;
+
+  box.style.display    = (type === 'cube')   ? 'block' : 'none';
+  sphere.style.display = (type === 'circle') ? 'block' : 'none';
+  custom.style.display = (type === 'lshape') ? 'block' : 'none';
+
+  const hasHole = document.getElementById('hasHole');
+  hole.style.display = (hasHole && hasHole.checked) ? 'block' : 'none';
+}
+
 function clearFormFields() {
-    const fields = ['boxWidth', 'boxHeight', 'boxDepth', 'sphereWidth', 'customWidth', 'customHeight', 'customDepth', 'holeWidth', 'holeHeight'];
-    fields.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-    document.getElementById('shapeType').value = 'cube';
+    /* const fields = ['boxWidth', 'boxHeight', 'boxDepth', 'sphereWidth', 'customWidth', 'customHeight', 'customDepth', 'holeWidth', 'holeHeight'];
+    fields.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; }); */
+    [
+        'boxWidth','boxHeight','boxDepth',
+        'sphereWidth',
+        'customWidth','customHeight','customDepth',
+        'holeWidth','holeHeight'
+    ].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+    /* document.getElementById('shapeType').value = 'cube';
     document.getElementById('color').value = '#00ff00';
     document.getElementById('hasHole').checked = false;
     document.getElementById('holeInput').style.display = 'none';
     document.getElementById('boxParams').style.display = 'none';
     document.getElementById('sphereParams').style.display = 'none';
-    document.getElementById('customParams').style.display = 'none';
+    document.getElementById('customParams').style.display = 'none'; */
+    updateParamVisibility();
 }
 
 function isOverlapping(newBox, ignore = null) {
@@ -463,22 +474,6 @@ document.getElementById('generate').addEventListener('click', () => {
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
     addToLibrary({ type, width, height, depth, color, hasHole, holeWidth, holeHeight });
     clearFormFields();
-    /* document.getElementById('color').value = '#00ff00';
-    document.getElementById('hasHole').checked = false;
-    document.getElementById('holeInput').style.display = 'none';
-    document.getElementById('boxParams').style.display = 'none';
-    document.getElementById('sphereParams').style.display = 'none';
-    document.getElementById('customParams').style.display = 'none';
-
-    ['boxWidth', 'boxHeight', 'boxDepth',
-     'sphereWidth',
-     'customWidth', 'customHeight', 'customDepth',
-     'holeWidth', 'holeHeight'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.value = '';
-    });
-
-    document.getElementById('shapeType').value = 'cube'; */
 });
 function animate(time) {
     requestAnimationFrame( animate );
@@ -493,6 +488,8 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+window.addEventListener('DOMContentLoaded', () => updateParamVisibility());
 
 (async () => {
     const video = document.createElement('video');
@@ -519,7 +516,7 @@ window.addEventListener('resize', () => {
             document.getElementById('shapeType').value = result.type;
             document.getElementById('shapeType').dispatchEvent(new Event('change'));
 
-            set("color", result.color); // ✅ 這裡已修正，不再重複 normalizeColor()
+            set("color", result.color); 
 
             if (result.type === "cube") {
                 set("boxWidth", result.width);

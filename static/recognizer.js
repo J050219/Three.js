@@ -30,7 +30,6 @@ function hideToast() {
   if (el) el.style.display = 'none';
 }
 
-// --- 顏色正規化（中文顏色 → #RRGGBB；不符合就給綠色） ---
 function normalizeColor(input) {
   const map = {
     '紅': '#ff0000', '紅色': '#ff0000',
@@ -50,7 +49,6 @@ function normalizeColor(input) {
   return hex || '#00ff00';
 }
 
-// --- 抽取工具 ---
 function pickNumber(text, regex, fallback = 20) {
   const m = text.match(regex);
   return m ? parseFloat(m[1]) : fallback;
@@ -87,16 +85,7 @@ export async function createRecognizer(videoElement) {
             const text = String(resJson.text || '');
             console.log('辨識結果:', text);
             window.__recognizeResult = text;
-
-            /* const colorMap = {
-                '紅': '#ff0000', '紅色': '#ff0000',
-                '藍': '#0000ff', '藍色': '#0000ff',
-                '綠': '#00ff00', '綠色': '#00ff00',
-                '白': '#ffffff', '白色': '#ffffff',
-                '黑': '#000000', '黑色': '#000000',
-                '紫': '#800080', '紫色': '#800080',
-                '黃': '#ffff00', '黃色': '#ffff00'
-            }; */
+            
             const extract = (regex) => {
                 const match = text.match(regex);
                 return match ? parseFloat(match[1]) : 20;

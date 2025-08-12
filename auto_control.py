@@ -33,7 +33,6 @@ def extract_params():
         "黑": "#000000", "黑色": "#000000"
     }
     color_match = re.search(r"(紅|綠|藍|黃|紫|白|黑)(色)?", text)
-    #color = color_map.get(color_match.group(0), "#00ff00") if color_match else "#00ff00"
     color_key = color_match.group(0) + "色" if color_match and not color_match.group(0).endswith("色") else color_match.group(0)
     color = color_map.get(color_key, "#00ff00")
     print("🟡 color key：", color_key)
@@ -59,31 +58,16 @@ def wait_for_recognize_button(driver):
             WebDriverWait(driver, 0.1).until(EC.alert_is_present())
             driver.switch_to.alert.accept()
             continue
-            #alert = driver.switch_to.alert
-            #print(f"⚠️ 偵測到警告視窗：{alert.text}")
-            #alert.accept()
-            #print("✅ 警告視窗已關閉")
         except:
             pass
 
             btn = driver.find_element(By.ID, "recognizeBtn")
-        #clicked = btn.get_attribute("data-clicked")
-        #if clicked == "true":
-        #print("🔘 偵測到使用者已按下按鈕")
-        #driver.execute_script("document.getElementById('recognizeBtn').setAttribute('data-clicked', 'false')")
-        #break
-        #except Exception as e:
-        #    print(f"❌ 找不到按鈕或屬性，錯誤：{e}")
         if btn.get_attribute("data-clicked") == "true":
             driver.execute_script("arguments[0].setAttribute('data-clicked','false');", btn)
             return
         time.sleep(1)
 
 def fill_form_with_selenium(driver, data):
-    #WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "shapeType")))
-    #shape_select = Select(driver.find_element(By.ID, "shapeType"))
-    #shape_select.select_by_value(data["type"])
-    #time.sleep(1) 
     shape_element = driver.find_element(By.ID, "shapeType")
     driver.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('change'));", shape_element, data["type"])
     driver.find_element(By.ID, "color").clear()
@@ -94,16 +78,13 @@ def fill_form_with_selenium(driver, data):
     """, data["color"])
 
     if data["type"] == "cube":
-        #WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "boxWidth")))
         shape = driver.find_element(By.ID, "shapeType")
         driver.find_element(By.ID, "boxWidth").send_keys(str(data["width"]))
         driver.find_element(By.ID, "boxHeight").send_keys(str(data["height"]))
         driver.find_element(By.ID, "boxDepth").send_keys(str(data["depth"]))
     elif data["type"] == "circle":
-        #WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "sphereWidth")))
         driver.find_element(By.ID, "sphereWidth").send_keys(str(data["width"]))
     elif data["type"] == "lshape":
-        #WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "customWidth")))
         driver.find_element(By.ID, "customWidth").send_keys(str(data["width"]))
         driver.find_element(By.ID, "customHeight").send_keys(str(data["height"]))
         driver.find_element(By.ID, "customDepth").send_keys(str(data["depth"]))
@@ -130,7 +111,6 @@ if __name__ == "__main__":
     #time.sleep(1)
     while True:
         wait_for_recognize_button(driver)
-        #image_base64 = capture_image_from_camera("captured_images/img.jpg")
         data = extract_params()
         if data:
             fill_form_with_selenium(driver, data)

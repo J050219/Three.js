@@ -14,17 +14,14 @@ def static_node_modules(filename):
     base = os.path.join(app.static_folder, 'node_modules')
     full = os.path.join(base, filename)
 
-    # 1) 目錄 → 傳回 index.js
     if os.path.isdir(full):
         idx = os.path.join(filename, 'index.js')
         if os.path.exists(os.path.join(base, idx)):
             return send_from_directory(base, idx)
 
-    # 2) 檔案剛好存在 → 直接回
     if os.path.exists(full):
         return send_from_directory(base, filename)
 
-    # 3) 沒副檔名 → 依序補 .js / .mjs
     root, ext = os.path.splitext(full)
     if ext == '':
         for suf in ('.js', '.mjs'):
