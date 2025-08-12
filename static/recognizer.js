@@ -65,11 +65,18 @@ export async function createRecognizer(videoElement) {
     } catch (err) {
         console.error("❌ 無法播放視訊", err);
     }
+    let busy = false; // 連續辨識鎖
 
     return async function recognize(callback) {
-        alert('已拍攝圖片，正在辨識...');
+        if (busy) return; // 防止連點
+        busy = true;
+        const btn = document.getElementById('recognizeBtn');
+        const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '辨識參數'; } };
+        if (btn) { btn.disabled = true; btn.textContent = '辨識中…'; }
+        showToast('📷 已拍攝圖片，正在辨識…');
         try {
             const res = await fetch("/ovis-recognize-from-camera", { method: 'POST' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
             const resJson = await res.json();
             if (resJson.error) {
                 console.error('伺服器回應錯誤:', resJson.error);
@@ -121,6 +128,9 @@ export async function createRecognizer(videoElement) {
             console.error('辨識錯誤:', err);
             showToast('⚠️ 發生錯誤，請稍後再試');
             setTimeout(hideToast, 1500);
+        }finally {
+        busy = false;
+        restoreBtn();
         }
     };
 }

@@ -7,6 +7,84 @@ import TWEEN from '@tweenjs/tween.js';
 
 const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
 
+const LIB_KEY = 'recognizedLibrary';
+
+function getLibrarySafe() {
+  let arr;
+  try { arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); }
+  catch { arr = []; }
+  if (!Array.isArray(arr)) arr = [];
+  return arr;
+}
+const library = getLibrarySafe();
+
+function saveLibrary() {
+    try { localStorage.setItem(LIB_KEY, JSON.stringify(library)); }
+    catch (e) { console.warn('localStorage 寫入失敗:', e); }
+}
+
+function summarize(item) {
+  const { type, width, height, depth, color, hasHole, holeWidth, holeHeight } = item;
+  const typeName = type === 'cube' ? '立方體' : type === 'circle' ? '球體' : '不規則';
+  const size = type === 'circle' ? `${width}` : `${width}×${height}×${depth}`;
+  const hole = hasHole ? `孔 ${holeWidth ?? 0}×${holeHeight ?? 0}` : '無孔';
+  return { title: `${typeName} / ${size}`, hole, color };
+}
+
+function renderLibrary() {
+  const list = document.getElementById('libraryList');
+  if (!list) return;
+
+  if (!Array.isArray(library) || library.length === 0) {
+    list.innerHTML = `<div style="color:#666;font-size:12px;line-height:1.6;">
+      （清單目前沒有項目）<br>
+      ・按「辨識參數」後會自動加入<br>
+      ・或用上方表單產生後也會加入
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = library.map((p, i) => {
+    const typeName = p.type === 'cube' ? '立方體' : p.type === 'circle' ? '球體' : '不規則';
+    const size = p.type === 'circle' ? `${p.width}` : `${p.width}×${p.height}×${p.depth}`;
+    const hole = p.hasHole ? `孔 ${p.holeWidth ?? 0}×${p.holeHeight ?? 0}` : '無孔';
+    return `<div class="item" data-index="${i}">
+      <div><strong>${typeName} / ${size}</strong></div>
+      <div class="row"><span class="chip" style="background:${p.color}"></span><span>${hole}</span></div>
+      <button class="btn use-item" data-index="${i}">放到場景</button>
+    </div>`;
+  }).join('');
+}
+
+function addToLibrary(params) {
+  const n = (v,d)=> (Number.isFinite(+v)? +v : d);
+  const clean = {
+    type: params.type || 'cube',
+    width:  n(params.width, 20),
+    height: n(params.height, params.type === 'circle' ? params.width : 20),
+    depth:  n(params.depth,  params.type === 'circle' ? params.width : 20),
+    color:  params.color || '#00ff00',
+    hasHole: !!params.hasHole,
+    holeWidth:  n(params.holeWidth, 10),
+    holeHeight: n(params.holeHeight, 10),
+  };
+  console.log('[Library] add', clean);
+  library.unshift(clean);
+  library.splice(60);
+  try { localStorage.setItem(LIB_KEY, JSON.stringify(library)); } catch {}
+  renderLibrary();
+}
+
+/* 點清單的「放到場景」 */
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('.use-item');
+  if (!btn) return;
+  const idx = +btn.dataset.index;
+  const item = library[idx];
+  if (!item) return;
+  createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight);
+});
+
 /* const colorMap = {
     "紅色": "#ff0000",
     "綠色": "#00ff00",
@@ -61,13 +139,13 @@ const light = new THREE.DirectionalLight(0xffffff, 1);
 light.position.set(50, 50, 100);
 scene.add(light);
 
-const palletGeometry = new THREE.BoxGeometry(100, 10, 100);
+const palletGeometry = new THREE.BoxGeometry(110, 10, 110);
 const palletMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
 const pallet = new THREE.Mesh(palletGeometry, palletMaterial);
 pallet.position.y = -5;
 scene.add(pallet);
 
-const containerGeometry = new THREE.BoxGeometry(100, 100, 100);
+const containerGeometry = new THREE.BoxGeometry(110, 110, 110);
 const containerMaterial = new THREE.MeshStandardMaterial({
     color: 0x00ffff,
     transparent: true,
@@ -383,6 +461,7 @@ document.getElementById('generate').addEventListener('click', () => {
         depth = parseFloat(document.getElementById('customDepth').value || 20);
     }
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
+    addToLibrary({ type, width, height, depth, color, hasHole, holeWidth, holeHeight });
     clearFormFields();
     /* document.getElementById('color').value = '#00ff00';
     document.getElementById('hasHole').checked = false;
@@ -426,6 +505,7 @@ window.addEventListener('resize', () => {
 
     document.getElementById('recognizeBtn').addEventListener('click', () => {
         recognize((result) => {
+            addToLibrary(result);
             const set = (id, val) => {
                 const el = document.getElementById(id);
                 if (el && val !== undefined && val !== null && val !== '') {
@@ -467,3 +547,4 @@ window.addEventListener('resize', () => {
         });
     });
 })();
+renderLibrary();

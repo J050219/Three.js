@@ -18,7 +18,8 @@
     </script>
 
     <style>
-      body { margin: 0; overflow: hidden; background: black; }
+      * { box-sizing: border-box; }
+      body { margin: 0; overflow: hidden; background: black; font-family: system-ui, sans-serif; }
       #ui {
         position: absolute;
         top: 10px;
@@ -48,6 +49,34 @@
         border: 2px solid #00ff00;
         background-color: black;
         z-index: 5;
+      }
+      #library {
+        position: absolute;
+        top: 240px; left: 10px;
+        width: 320px; height: 260px;
+        background: rgba(255,255,255,.95);
+        border-radius: 10px;
+        padding: 10px;
+        z-index: 12;
+        display: flex;
+        flex-direction: column;
+        color: #111;
+      }
+      #library h3 { margin: 0 0 8px; font-size: 16px; }
+      #libraryList {
+        flex: 1 1 auto;
+        overflow: auto;
+        display: block;
+      }
+      #libraryList .item {
+        border: 1px solid #ddd; border-radius: 8px; padding: 8px; margin-bottom: 8px;
+        background: #fff;
+      }
+      #libraryList .row { font-size: 12px; color:#555; margin-top: 4px; display:flex; align-items:center; gap:6px; }
+      #libraryList .chip { width:14px; height:14px; border-radius:3px; border:1px solid #ccc; display:inline-block; }
+      #libraryList .btn {
+        margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 6px; border: 0;
+        background:#0ea5e9; color:#fff; cursor:pointer;
       }
     </style>
   </head>
@@ -92,11 +121,33 @@
         </div>
         <button id="generate">產生物體</button>
         <button id="recognizeBtn" onclick="this.setAttribute('data-clicked', 'true')">辨識參數</button>
-
     </div>
+    <aside id="library">
+      <h3>已辨識物件</h3>
+      <div id="libraryList"></div>
+    </aside>
 
     <img id="video" src="http://127.0.0.1:5000/get-camera-frame" alt="攝影機畫面" />
 
     <script type="module" src="/static/main.js"></script>
+    <script>
+      function placeLibrary() {
+        const ui = document.getElementById('ui');
+        const lib = document.getElementById('library');
+        if (!ui || !lib) return;
+        const r = ui.getBoundingClientRect();
+
+        lib.style.left = r.left + 'px';
+        lib.style.top  = (r.bottom + 10) + 'px';
+        lib.style.width = r.width + 'px';
+
+        // 依剩餘空間調整高度（最少 160px，最多 340px）
+        const maxH = window.innerHeight - (r.bottom + 20);
+        const h = Math.max(220, Math.min(460, maxH));
+        lib.style.height = h + 'px';
+      }
+      window.addEventListener('load', placeLibrary);
+      window.addEventListener('resize', placeLibrary);
+    </script>
   </body>
 </html>
