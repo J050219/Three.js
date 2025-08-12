@@ -149,6 +149,60 @@ scene.add(container);
 
 const objects = [];
 
+let selectedObj = null;
+let selectionHelper = null;
+
+function showSelection(obj) {
+  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+  if (obj) {
+    selectionHelper = new THREE.BoxHelper(obj, 0xffaa00);
+    scene.add(selectionHelper);
+  }
+}
+
+function deleteSelected() {
+  if (!selectedObj) return;
+  const i = objects.indexOf(selectedObj);
+  if (i >= 0) objects.splice(i, 1);
+  scene.remove(selectedObj);
+  selectedObj = null;
+  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+}
+
+function clearAllObjects() {
+  objects.forEach(o => scene.remove(o));
+  objects.length = 0;
+  selectedObj = null;
+  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+}
+
+function ensureSceneButtons() {
+  const ui = document.getElementById('ui');
+  if (!ui) return;
+
+  if (!document.getElementById('deleteSelectedBtn')) {
+    const b1 = document.createElement('button');
+    b1.id = 'deleteSelectedBtn';
+    b1.textContent = '刪除選取';
+    b1.style.marginLeft = '8px';
+    ui.appendChild(b1);
+    b1.addEventListener('click', deleteSelected);
+  }
+  if (!document.getElementById('clearAllBtn')) {
+    const b2 = document.createElement('button');
+    b2.id = 'clearAllBtn';
+    b2.textContent = '清空容器';
+    b2.style.marginLeft = '8px';
+    ui.appendChild(b2);
+    b2.addEventListener('click', clearAllObjects);
+  }
+}
+
+// Delete / Backspace 快捷鍵
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
+});
+
 function updateParamVisibility(type = document.getElementById('shapeType')?.value) {
   const box    = document.getElementById('boxParams');
   const sphere = document.getElementById('sphereParams');
@@ -370,13 +424,18 @@ renderer.domElement.addEventListener('mousedown', (event) => {
     raycaster.setFromCamera(mouse, camera);
 
     const intersects = raycaster.intersectObjects(objects.filter(obj => obj.userData.type === 'custom'), true);
-    if (intersects.length === 0) return;
-
+    if (intersects.length === 0) {
+        selectedObj = null;
+        showSelection(null);
+        return;
+    }
     currentTarget = intersects[0].object;
     while (currentTarget.parent && !currentTarget.userData.type) {
         currentTarget = currentTarget.parent;
     }
 
+    selectedObj = currentTarget;
+    showSelection(selectedObj);
     if (event.button === 0) {
         const jumpHeight = 10;
         const originalY = findRestingY(currentTarget);
