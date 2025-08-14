@@ -63,10 +63,10 @@ export async function createRecognizer(videoElement) {
     } catch (err) {
         console.error("❌ 無法播放視訊", err);
     }
-    let busy = false; // 連續辨識鎖
+    let busy = false; 
 
     return async function recognize(callback) {
-        if (busy) return; // 防止連點
+        if (busy) return; 
         busy = true;
         const btn = document.getElementById('recognizeBtn');
         const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '辨識參數'; } };

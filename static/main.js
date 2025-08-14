@@ -6,15 +6,14 @@ import { createRecognizer } from './recognizer.js';
 import TWEEN from '@tweenjs/tween.js';
 
 const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
-
 const LIB_KEY = 'recognizedLibrary';
 
 function getLibrarySafe() {
-  let arr;
-  try { arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); }
-  catch { arr = []; }
-  if (!Array.isArray(arr)) arr = [];
-  return arr;
+    let arr;
+    try { arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); }
+    catch { arr = []; }
+    if (!Array.isArray(arr)) arr = [];
+    return arr;
 }
 const library = getLibrarySafe();
 
@@ -24,64 +23,64 @@ function saveLibrary() {
 }
 
 function summarize(item) {
-  const { type, width, height, depth, color, hasHole, holeWidth, holeHeight } = item;
-  const typeName = type === 'cube' ? '立方體' : type === 'circle' ? '球體' : '不規則';
-  const size = type === 'circle' ? `${width}` : `${width}×${height}×${depth}`;
-  const hole = hasHole ? `孔 ${holeWidth ?? 0}×${holeHeight ?? 0}` : '無孔';
-  return { title: `${typeName} / ${size}`, hole, color };
+    const { type, width, height, depth, color, hasHole, holeWidth, holeHeight } = item;
+    const typeName = type === 'cube' ? '立方體' : type === 'circle' ? '球體' : '不規則';
+    const size = type === 'circle' ? `${width}` : `${width}×${height}×${depth}`;
+    const hole = hasHole ? `孔 ${holeWidth ?? 0}×${holeHeight ?? 0}` : '無孔';
+    return { title: `${typeName} / ${size}`, hole, color };
 }
 
 function renderLibrary() {
-  const list = document.getElementById('libraryList');
-  if (!list) return;
+    const list = document.getElementById('libraryList');
+    if (!list) return;
 
-  if (!Array.isArray(library) || library.length === 0) {
-    list.innerHTML = `<div style="color:#666;font-size:12px;line-height:1.6;">
-      （清單目前沒有項目）<br>
-      ・按「辨識參數」後會自動加入<br>
-      ・或用上方表單產生後也會加入
-    </div>`;
-    return;
-  }
+    if (!Array.isArray(library) || library.length === 0) {
+        list.innerHTML = `<div style="color:#666;font-size:12px;line-height:1.6;">
+        （清單目前沒有項目）<br>
+        ・按「辨識參數」後會自動加入<br>
+        ・或用上方表單產生後也會加入
+        </div>`;
+        return;
+    }
 
-  list.innerHTML = library.map((p, i) => {
-    const typeName = p.type === 'cube' ? '立方體' : p.type === 'circle' ? '球體' : '不規則';
-    const size = p.type === 'circle' ? `${p.width}` : `${p.width}×${p.height}×${p.depth}`;
-    const hole = p.hasHole ? `孔 ${p.holeWidth ?? 0}×${p.holeHeight ?? 0}` : '無孔';
-    return `<div class="item" data-index="${i}">
-      <div><strong>${typeName} / ${size}</strong></div>
-      <div class="row"><span class="chip" style="background:${p.color}"></span><span>${hole}</span></div>
-      <button class="btn use-item" data-index="${i}">放到場景</button>
-    </div>`;
-  }).join('');
+    list.innerHTML = library.map((p, i) => {
+        const typeName = p.type === 'cube' ? '立方體' : p.type === 'circle' ? '球體' : '不規則';
+        const size = p.type === 'circle' ? `${p.width}` : `${p.width}×${p.height}×${p.depth}`;
+        const hole = p.hasHole ? `孔 ${p.holeWidth ?? 0}×${p.holeHeight ?? 0}` : '無孔';
+        return `<div class="item" data-index="${i}">
+        <div><strong>${typeName} / ${size}</strong></div>
+        <div class="row"><span class="chip" style="background:${p.color}"></span><span>${hole}</span></div>
+        <button class="btn use-item" data-index="${i}">放到場景</button>
+        </div>`;
+    }).join('');
 }
 
 function addToLibrary(params) {
-  const n = (v,d)=> (Number.isFinite(+v)? +v : d);
-  const clean = {
-    type: params.type || 'cube',
-    width:  n(params.width, 20),
-    height: n(params.height, params.type === 'circle' ? params.width : 20),
-    depth:  n(params.depth,  params.type === 'circle' ? params.width : 20),
-    color:  params.color || '#00ff00',
-    hasHole: !!params.hasHole,
-    holeWidth:  n(params.holeWidth, 10),
-    holeHeight: n(params.holeHeight, 10),
-  };
-  console.log('[Library] add', clean);
-  library.unshift(clean);
-  library.splice(60);
-  try { localStorage.setItem(LIB_KEY, JSON.stringify(library)); } catch {}
-  renderLibrary();
+    const n = (v,d)=> (Number.isFinite(+v)? +v : d);
+    const clean = {
+        type: params.type || 'cube',
+        width:  n(params.width, 20),
+        height: n(params.height, params.type === 'circle' ? params.width : 20),
+        depth:  n(params.depth,  params.type === 'circle' ? params.width : 20),
+        color:  params.color || '#00ff00',
+        hasHole: !!params.hasHole,
+        holeWidth:  n(params.holeWidth, 10),
+        holeHeight: n(params.holeHeight, 10),
+    };
+    console.log('[Library] add', clean);
+    library.unshift(clean);
+    library.splice(60);
+    saveLibrary();
+    renderLibrary();
 }
 
 document.addEventListener('click', (e) => {
-  const btn = e.target.closest?.('.use-item');
-  if (!btn) return;
-  const idx = +btn.dataset.index;
-  const item = library[idx];
-  if (!item) return;
-  createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight);
+    const btn = e.target.closest?.('.use-item');
+    if (!btn) return;
+    const idx = +btn.dataset.index;
+    const item = library[idx];
+    if (!item) return;
+    createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight);
 });
 
 function normalizeColor(input) {
@@ -141,8 +140,8 @@ const containerMaterial = new THREE.MeshStandardMaterial({
 const container = new THREE.Mesh(containerGeometry, containerMaterial);
 container.position.y = 45;
 const containerEdges = new THREE.LineSegments(
-  new THREE.EdgesGeometry(containerGeometry),
-  new THREE.LineBasicMaterial({ color: 0x00ffff })
+    new THREE.EdgesGeometry(containerGeometry),
+    new THREE.LineBasicMaterial({ color: 0x00ffff })
 );
 container.add(containerEdges);
 scene.add(container);
@@ -153,74 +152,71 @@ let selectedObj = null;
 let selectionHelper = null;
 
 function showSelection(obj) {
-  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
-  if (obj) {
-    selectionHelper = new THREE.BoxHelper(obj, 0xffaa00);
-    scene.add(selectionHelper);
-  }
+    if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+    if (obj) {
+        selectionHelper = new THREE.BoxHelper(obj, 0xffaa00);
+        scene.add(selectionHelper);
+    }
 }
 
 function deleteSelected() {
-  if (!selectedObj) return;
-  const i = objects.indexOf(selectedObj);
-  if (i >= 0) objects.splice(i, 1);
-  scene.remove(selectedObj);
-  selectedObj = null;
-  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+    if (!selectedObj) return;
+    const i = objects.indexOf(selectedObj);
+    if (i >= 0) objects.splice(i, 1);
+    scene.remove(selectedObj);
+    selectedObj = null;
+    if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
 }
 
 function clearAllObjects() {
-  objects.forEach(o => scene.remove(o));
-  objects.length = 0;
-  selectedObj = null;
-  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+    objects.forEach(o => scene.remove(o));
+    objects.length = 0;
+    selectedObj = null;
+    if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
 }
 
 function ensureSceneButtons() {
-  const ui = document.getElementById('ui');
-  if (!ui) return;
+    const ui = document.getElementById('ui');
+    if (!ui) return;
 
-  if (!document.getElementById('deleteSelectedBtn')) {
-    const b1 = document.createElement('button');
-    b1.id = 'deleteSelectedBtn';
-    b1.textContent = '刪除選取';
-    b1.style.marginLeft = '8px';
-    ui.appendChild(b1);
-    b1.addEventListener('click', deleteSelected);
-  }
-  if (!document.getElementById('clearAllBtn')) {
-    const b2 = document.createElement('button');
-    b2.id = 'clearAllBtn';
-    b2.textContent = '清空容器';
-    b2.style.marginLeft = '8px';
-    ui.appendChild(b2);
-    b2.addEventListener('click', clearAllObjects);
-  }
+    if (!document.getElementById('deleteSelectedBtn')) {
+        const b1 = document.createElement('button');
+        b1.id = 'deleteSelectedBtn';
+        b1.textContent = '刪除選取';
+        b1.style.marginLeft = '8px';
+        ui.appendChild(b1);
+        b1.addEventListener('click', deleteSelected);
+    }
+    if (!document.getElementById('clearAllBtn')) {
+        const b2 = document.createElement('button');
+        b2.id = 'clearAllBtn';
+        b2.textContent = '清空容器';
+        b2.style.marginLeft = '8px';
+        ui.appendChild(b2);
+        b2.addEventListener('click', clearAllObjects);
+    }
 }
 
-// Delete / Backspace 快捷鍵
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
+    if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
 });
 
 function updateParamVisibility(type = document.getElementById('shapeType')?.value) {
-  const box    = document.getElementById('boxParams');
-  const sphere = document.getElementById('sphereParams');
-  const custom = document.getElementById('customParams');
-  const hole   = document.getElementById('holeInput');
-  if (!box || !sphere || !custom || !hole) return;
+    const box    = document.getElementById('boxParams');
+    const sphere = document.getElementById('sphereParams');
+    const custom = document.getElementById('customParams');
+    const hole   = document.getElementById('holeInput');
+    if (!box || !sphere || !custom || !hole) return;
 
-  box.style.display    = (type === 'cube')   ? 'block' : 'none';
-  sphere.style.display = (type === 'circle') ? 'block' : 'none';
-  custom.style.display = (type === 'lshape') ? 'block' : 'none';
+    box.style.display    = (type === 'cube')   ? 'block' : 'none';
+    sphere.style.display = (type === 'circle') ? 'block' : 'none';
+    custom.style.display = (type === 'lshape') ? 'block' : 'none';
 
-  const hasHole = document.getElementById('hasHole');
-  hole.style.display = (hasHole && hasHole.checked) ? 'block' : 'none';
+    const hasHole = document.getElementById('hasHole');
+    hole.style.display = (hasHole && hasHole.checked) ? 'block' : 'none';
 }
 
 function clearFormFields() {
-    /* const fields = ['boxWidth', 'boxHeight', 'boxDepth', 'sphereWidth', 'customWidth', 'customHeight', 'customDepth', 'holeWidth', 'holeHeight'];
-    fields.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; }); */
     [
         'boxWidth','boxHeight','boxDepth',
         'sphereWidth',
@@ -230,13 +226,6 @@ function clearFormFields() {
         const el = document.getElementById(id);
         if (el) el.value = '';
     });
-    /* document.getElementById('shapeType').value = 'cube';
-    document.getElementById('color').value = '#00ff00';
-    document.getElementById('hasHole').checked = false;
-    document.getElementById('holeInput').style.display = 'none';
-    document.getElementById('boxParams').style.display = 'none';
-    document.getElementById('sphereParams').style.display = 'none';
-    document.getElementById('customParams').style.display = 'none'; */
     updateParamVisibility();
 }
 
@@ -375,8 +364,8 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
     const size = new THREE.Vector3();
     box.getSize(size);
     const containerBox = new THREE.Box3().setFromObject(container);
-    const padding = 0.1; 
-    const step = 0.5;
+    const padding = 0.0; 
+    const step = 0.25;
     const leftX = containerBox.min.x + size.x / 2;
     const backZ = containerBox.min.z + size.z / 2;
     mesh.position.set(leftX, 0, backZ);
@@ -416,6 +405,11 @@ let offset = new THREE.Vector3();
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 const planeIntersect = new THREE.Vector3();
+let spaceDown = false;
+let lastMouseY = 0;
+let isRotating = false;
+const rotateStart = new THREE.Vector2();
+const initialRot = new THREE.Euler();
 
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 renderer.domElement.addEventListener('mousedown', (event) => {
@@ -424,18 +418,28 @@ renderer.domElement.addEventListener('mousedown', (event) => {
     raycaster.setFromCamera(mouse, camera);
 
     const intersects = raycaster.intersectObjects(objects.filter(obj => obj.userData.type === 'custom'), true);
-    if (intersects.length === 0) {
-        selectedObj = null;
-        showSelection(null);
+    if (intersects.length === 0 ) {
+        if (event.button === 0 && !event.shiftKey) {
+            selectedObj = null;
+            showSelection(null);
+        }
         return;
     }
     currentTarget = intersects[0].object;
     while (currentTarget.parent && !currentTarget.userData.type) {
         currentTarget = currentTarget.parent;
     }
-
     selectedObj = currentTarget;
     showSelection(selectedObj);
+
+    if (event.button === 0 && event.shiftKey && selectedObj) {
+        isRotating = true;
+        rotateStart.set(event.clientX, event.clientY);
+        initialRot.copy(selectedObj.rotation);
+        controls.enabled = false;
+        return;
+    } 
+
     if (event.button === 0) {
         const jumpHeight = 10;
         const originalY = findRestingY(currentTarget);
@@ -453,40 +457,114 @@ renderer.domElement.addEventListener('mousedown', (event) => {
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         raycaster.ray.intersectPlane(plane, planeIntersect);
         offset.copy(planeIntersect).sub(currentTarget.position);
-        isDragging = true;        
+        isDragging = true;
+        lastMouseY = event.clientY;        
     }
 });
 
 renderer.domElement.addEventListener('mouseup', () => {
     isDragging = false;
     currentTarget = null;
+    if (isRotating) {
+        isRotating = false;
+        controls.enabled = true;
+    }
 });
 
 renderer.domElement.addEventListener('mousemove',(event) =>{
+    if (isRotating && selectedObj) {
+        const dx = event.clientX - rotateStart.x;
+        const dy = event.clientY - rotateStart.y;
+        selectedObj.rotation.y = initialRot.y + dx * 0.01;
+        selectedObj.rotation.x = THREE.MathUtils.clamp(initialRot.x + dy * 0.01, -Math.PI/2, Math.PI/2);
+        if (selectionHelper) selectionHelper.update();
+        return;
+    }
     if (!isDragging || !currentTarget) return;
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
-    
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-    if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
-        const newPos = planeIntersect.clone().sub(offset);
-        const containerBox = new THREE.Box3().setFromObject(container);
-        const targetBox = new THREE.Box3().setFromObject(currentTarget);
-        const targetSize = new THREE.Vector3();
-        targetBox.getSize(targetSize);
-        const halfSize = targetSize.clone().multiplyScalar(0.5);
-        const min = containerBox.min.clone().add(halfSize);
-        const max = containerBox.max.clone().sub(halfSize);
-        newPos.x = THREE.MathUtils.clamp(newPos.x, min.x, max.x);
-        newPos.z = THREE.MathUtils.clamp(newPos.z, min.z, max.z);
-        const testBox = currentTarget.clone();
-        testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
-        if (!isOverlapping(testBox, currentTarget)) {
-            currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
+    const containerBox = new THREE.Box3().setFromObject(container);
+    const targetBox = new THREE.Box3().setFromObject(currentTarget);
+    const targetSize = new THREE.Vector3();
+    targetBox.getSize(targetSize);
+    const halfSize = targetSize.clone().multiplyScalar(0.5);
+    const minX = containerBox.min.x + halfSize.x;
+    const maxX = containerBox.max.x - halfSize.x;
+    const minZ = containerBox.min.z + halfSize.z;
+    const maxZ = containerBox.max.z - halfSize.z;
+    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+    const minY = Math.max(containerBox.min.y + halfSize.y, palletTop + halfSize.y - halfSize.y);
+    const maxY = containerBox.max.y - halfSize.y;
+
+    if (!spaceDown) {
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
+            const newPos = planeIntersect.clone().sub(offset);
+            newPos.x = THREE.MathUtils.clamp(newPos.x, minX, maxX);
+            newPos.z = THREE.MathUtils.clamp(newPos.z, minZ, maxZ);
+            const testBox = currentTarget.clone();
+            testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
+            if (!isOverlapping(testBox, currentTarget)) {
+                currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
+            }
         }
+    } else {
+        const dy = (lastMouseY - event.clientY) * 0.1; 
+        let newY = THREE.MathUtils.clamp(currentTarget.position.y + dy, minY, maxY);
+        const testBox = currentTarget.clone();
+        testBox.position.set(currentTarget.position.x, newY, currentTarget.position.z);
+        if (!isOverlapping(testBox, currentTarget)) {
+            currentTarget.position.y = newY;
+        }
+        lastMouseY = event.clientY;
     }
 });
+
+function nudgeSelectedByArrow(code) {
+    if (!isDragging || !selectedObj) return;
+    const step = 0.5;
+    const containerBox = new THREE.Box3().setFromObject(container);
+    const sb = new THREE.Box3().setFromObject(selectedObj);
+    const size = new THREE.Vector3(); sb.getSize(size);
+    const half = size.clone().multiplyScalar(0.5);
+    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+    const minX = containerBox.min.x + half.x;
+    const maxX = containerBox.max.x - half.x;
+    const minZ = containerBox.min.z + half.z;
+    const maxZ = containerBox.max.z - half.z;
+    const minY = Math.max(containerBox.min.y + half.y, palletTop + half.y - half.y);
+    const maxY = containerBox.max.y - half.y;
+    let nx = selectedObj.position.x;
+    let ny = selectedObj.position.y;
+    let nz = selectedObj.position.z;
+    if (spaceDown) {
+        if (code === 'ArrowUp') ny += step;
+        if (code === 'ArrowDown') ny -= step;
+    } else {
+        if (code === 'ArrowLeft') nx -= step;
+        if (code === 'ArrowRight') nx += step;
+        if (code === 'ArrowUp') nz -= step;
+        if (code === 'ArrowDown') nz += step;
+    }
+    nx = THREE.MathUtils.clamp(nx, minX, maxX);
+    ny = THREE.MathUtils.clamp(ny, minY, maxY);
+    nz = THREE.MathUtils.clamp(nz, minZ, maxZ);
+    const test = selectedObj.clone();
+    test.position.set(nx, ny, nz);
+    if (!isOverlapping(test, selectedObj)) {
+        selectedObj.position.set(nx, ny, nz);
+    }
+}
+
+window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.code)) {
+        nudgeSelectedByArrow(e.code);
+        e.preventDefault();
+    }
+});
+window.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceDown = false; });
 
 renderer.domElement.addEventListener('wheel', (event) => {
     const zoomSpeed = 1.1;
@@ -538,17 +616,21 @@ function animate(time) {
     requestAnimationFrame( animate );
     controls.update();
     TWEEN.update(time);
+    if (selectionHelper && selectedObj) selectionHelper.update();
     renderer.render( scene, camera );
 }
 animate();
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-window.addEventListener('DOMContentLoaded', () => updateParamVisibility());
+window.addEventListener('DOMContentLoaded', () => {
+    updateParamVisibility();
+    ensureSceneButtons();
+});
 
 (async () => {
     const video = document.createElement('video');
@@ -558,7 +640,6 @@ window.addEventListener('DOMContentLoaded', () => updateParamVisibility());
     video.style.display = 'none';
     document.body.appendChild(video);
     const recognize = await createRecognizer(video);
-
     document.getElementById('recognizeBtn').addEventListener('click', () => {
         recognize((result) => {
             addToLibrary(result);
@@ -571,12 +652,9 @@ window.addEventListener('DOMContentLoaded', () => updateParamVisibility());
                     }
                 }
             };
-
             document.getElementById('shapeType').value = result.type;
             document.getElementById('shapeType').dispatchEvent(new Event('change'));
-
             set("color", result.color); 
-
             if (result.type === "cube") {
                 set("boxWidth", result.width);
                 set("boxHeight", result.height);
@@ -588,7 +666,6 @@ window.addEventListener('DOMContentLoaded', () => updateParamVisibility());
                 set("customHeight", result.height);
                 set("customDepth", result.depth);
             }
-
             document.getElementById("hasHole").checked = result.hasHole;
             if (result.hasHole) {
                 set("holeWidth", result.holeWidth);
