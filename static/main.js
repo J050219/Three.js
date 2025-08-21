@@ -8,6 +8,20 @@ import TWEEN from '@tweenjs/tween.js';
 const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
 const LIB_KEY = 'recognizedLibrary';
 
+const TETROMINO_TYPES = new Set(['tI','tT','tZ','tL']);
+function typeLabel(t) {
+  switch (t) {
+    case 'tI': return 'I 形方塊';
+    case 'tT': return 'T 形方塊';
+    case 'tZ': return 'Z 形方塊';
+    case 'tL': return 'L 形方塊';
+    case 'cube': return '立方體';
+    case 'circle': return '球體';
+    case 'lshape': return '不規則';
+    default: return t;
+  }
+}
+
 function getLibrarySafe() {
     let arr;
     try { arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); }
@@ -24,8 +38,10 @@ function saveLibrary() {
 
 function summarize(item) {
     const { type, width, height, depth, color, hasHole, holeWidth, holeHeight } = item;
-    const typeName = type === 'cube' ? '立方體' : type === 'circle' ? '球體' : '不規則';
-    const size = type === 'circle' ? `${width}` : `${width}×${height}×${depth}`;
+    const typeName = typeLabel(type);
+    const size = (type === 'circle') ? `${width}` :
+                 (TETROMINO_TYPES.has(type) ? `單位=${width}` :
+                 `${width}×${height}×${depth}`);
     const hole = hasHole ? `孔 ${holeWidth ?? 0}×${holeHeight ?? 0}` : '無孔';
     return { title: `${typeName} / ${size}`, hole, color };
 }
@@ -44,15 +60,13 @@ function renderLibrary() {
     }
 
     list.innerHTML = library.map((p, i) => {
-        const typeName = p.type === 'cube' ? '立方體' : p.type === 'circle' ? '球體' : '不規則';
-        const size = p.type === 'circle' ? `${p.width}` : `${p.width}×${p.height}×${p.depth}`;
-        const hole = p.hasHole ? `孔 ${p.holeWidth ?? 0}×${p.holeHeight ?? 0}` : '無孔';
-        return `<div class="item" data-index="${i}">
-        <div><strong>${typeName} / ${size}</strong></div>
-        <div class="row"><span class="chip" style="background:${p.color}"></span><span>${hole}</span></div>
-        <button class="btn use-item" data-index="${i}">放到場景</button>
-        </div>`;
-    }).join('');
+    const { title, hole, color } = summarize(p);
+    return `<div class="item" data-index="${i}">
+      <div><strong>${title}</strong></div>
+      <div class="row"><span class="chip" style="background:${color}"></span><span>${hole}</span></div>
+      <button class="btn use-item" data-index="${i}">放到場景</button>
+    </div>`;
+  }).join('');
 }
 
 function addToLibrary(params) {
@@ -60,10 +74,10 @@ function addToLibrary(params) {
     const clean = {
         type: params.type || 'cube',
         width:  n(params.width, 20),
-        height: n(params.height, params.type === 'circle' ? params.width : 20),
-        depth:  n(params.depth,  params.type === 'circle' ? params.width : 20),
+        height: n(params.height, TETROMINO_TYPES.has(params.type) ? params.width : (params.type === 'circle' ? params.width : 20)),
+        depth:  n(params.depth,  TETROMINO_TYPES.has(params.type) ? params.width : (params.type === 'circle' ? params.width : 20)),
         color:  params.color || '#00ff00',
-        hasHole: !!params.hasHole,
+        hasHole: TETROMINO_TYPES.has(params.type) ? false : !!params.hasHole,
         holeWidth:  n(params.holeWidth, 10),
         holeHeight: n(params.holeHeight, 10),
     };
@@ -147,7 +161,6 @@ container.add(containerEdges);
 scene.add(container);
 
 const objects = [];
-
 let selectedObj = null;
 let selectionHelper = null;
 
@@ -201,6 +214,33 @@ window.addEventListener('keydown', (e) => {
     if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
 });
 
+function buildTetrominoMesh(kind, unit, material) {
+  const group = new THREE.Group();
+  const g = new THREE.BoxGeometry(unit, unit, unit);
+  let layout = [];
+  switch (kind) {
+    case 'tI': layout = [[-1.5,0],[ -0.5,0],[ 0.5,0],[ 1.5,0]]; break;
+    case 'tT': layout = [[-1,0],[0,0],[1,0],[0,1]]; break;
+    case 'tZ': layout = [[-1,0],[0,0],[0,1],[1,1]]; break;
+    case 'tL': layout = [[-1,0],[0,0],[1,0],[-1,1]]; break;
+    default:   layout = [[-1,0],[0,0],[1,0],[0,1]];
+  }
+  for (const [gx,gz] of layout) {
+    const cube = new THREE.Mesh(g, material);
+    cube.position.set(gx * unit, 0, gz * unit);
+    group.add(cube);
+  }
+  // 中心歸零
+  const box = new THREE.Box3().setFromObject(group);
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  group.children.forEach(c => {
+    c.position.sub(center);
+  });
+  group.userData.unit = unit;
+  return group;
+}
+
 function updateParamVisibility(type = document.getElementById('shapeType')?.value) {
     const box    = document.getElementById('boxParams');
     const sphere = document.getElementById('sphereParams');
@@ -208,12 +248,38 @@ function updateParamVisibility(type = document.getElementById('shapeType')?.valu
     const hole   = document.getElementById('holeInput');
     if (!box || !sphere || !custom || !hole) return;
 
-    box.style.display    = (type === 'cube')   ? 'block' : 'none';
+    const isTet = TETROMINO_TYPES.has(type);
+
+    if (isTet) {
+        box.style.display    = 'block';
+        sphere.style.display = 'none';
+        custom.style.display = 'none';
+        hole.style.display = 'none';
+        const w = document.getElementById('boxWidth');
+        const h = document.getElementById('boxHeight');
+        const d = document.getElementById('boxDepth');
+        if (w) { w.placeholder = '單位邊長'; w.style.display = 'block'; }
+        if (h) { h.value = ''; h.style.display = 'none'; }
+        if (d) { d.value = ''; d.style.display = 'none'; }
+
+        const chk = document.getElementById('hasHole');
+        if (chk) chk.checked = false;
+        hole.style.display = 'none';
+        return;
+    }
+    box.style.display = (type === 'cube') ? 'block' : 'none';
     sphere.style.display = (type === 'circle') ? 'block' : 'none';
     custom.style.display = (type === 'lshape') ? 'block' : 'none';
 
-    const hasHole = document.getElementById('hasHole');
-    hole.style.display = (hasHole && hasHole.checked) ? 'block' : 'none';
+    if (type === 'cube') {
+        ['boxWidth','boxHeight','boxDepth'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = 'block';
+        });
+        hole.style.display = (document.getElementById('hasHole').checked ? 'block' : 'none');
+    } else {
+        hole.style.display = 'none';
+    }
 }
 
 function clearFormFields() {
@@ -229,33 +295,31 @@ function clearFormFields() {
     updateParamVisibility();
 }
 
-function isOverlapping(newBox, ignore = null) {
-    const newBoxBounds = [];
-    newBox.updateMatrixWorld(true);
-    newBox.traverse(child => {
-        if (child.isMesh) {
-            const box = new THREE.Box3().setFromObject(child);
-            newBoxBounds.push(box);
-        }
-    });
+function _collectAABBs(root) {
+  const boxes = [];
+  root.updateMatrixWorld(true);
+  root.traverse(n => {
+    if (n.isMesh) {
+      const b = new THREE.Box3().setFromObject(n);
+      boxes.push(b);
+    }
+  });
+  return boxes;
+}
+    
+function isOverlapping(ncandidate, ignore = null, eps = 1e-3) {
+    const cand = _collectAABBs(ncandidate);
     for (const obj of objects) {
         if (obj === ignore) continue;
-        obj.updateMatrixWorld(true);
-        const objBoxes = [];
-        obj.traverse(child => {
-            if (child.isMesh) {
-                const box = new THREE.Box3().setFromObject(child);
-                objBoxes.push(box);
-            }
-        });
-        for (const newBound of newBoxBounds) {
-            for (const box of objBoxes) {
-                if (newBound.intersectsBox(box)) {
-                    const minA = newBound.min;
-                    const maxA = newBound.max;
-                    const minB = box.min;
-                    const maxB = box.max;
-                    const vertical = maxA.y <= minB.y || minA.y >= maxB.y;
+        const obs = _collectAABBs(obj);
+        for (const c of cand) {
+            for (const o of obs) {
+                // 加上一點點間隙（-eps 代表稍微放寬）
+                if (c.max.x - eps > o.min.x && c.min.x + eps < o.max.x &&
+                    c.max.y - eps > o.min.y && c.min.y + eps < o.max.y &&
+                    c.max.z - eps > o.min.z && c.min.z + eps < o.max.z) {
+                    // 若只是上下堆疊（不算側向碰撞），直接當作無重疊
+                    const vertical = c.max.y <= o.min.y + eps || c.min.y >= o.max.y - eps;
                     if (!vertical) return true;
                 }
             }
@@ -285,12 +349,49 @@ function applyColorToMaterial(color) {
     return new THREE.MeshStandardMaterial({ color: new THREE.Color(normalizeColor(color)) });
 }
 
+function placeInsideContainer(mesh) {
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const containerBox = new THREE.Box3().setFromObject(container);
+  const padding = 0.03;      // 盡量貼齊但避免相交
+  //const step = Math.max(0.25, Math.min(size.x, size.z) / 4); // 隨尺寸調整步距
+  const grid = mesh.userData?.unit || null;
+  const step = grid ? grid : Math.max(0.25, Math.min(size.x, size.z) / 4);
+  const snap = (v, g) => g ? Math.round(v / g) * g : v;
+  const leftX = containerBox.min.x + size.x / 2 + padding;
+  const rightX = containerBox.max.x - size.x / 2 - padding;
+  const backZ = containerBox.min.z + size.z / 2 + padding;
+  const frontZ = containerBox.max.z - size.z / 2 - padding;
+
+  // 先靠最左後角開始掃描，盡量靠邊放置
+  for (let x = leftX; x <= rightX; x += step) {
+    for (let z = backZ; z <= frontZ; z += step) {
+      let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2 + padding;
+      const maxY = containerBox.max.y - size.y / 2 - padding;
+      while (y <= maxY) {
+        //mesh.position.set(x, y, z);
+        mesh.position.set(snap(x, grid), y, snap(z, grid));
+        mesh.position.y = findRestingY(mesh);
+        if (!isOverlapping(mesh)) {
+          scene.add(mesh);
+          objects.push(mesh);
+          return true;
+        }
+        y += 0.5;
+      }
+    }
+  }
+  return false;
+}
+
 function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight) {
     const material = applyColorToMaterial(color);
     let mesh;
-    if (type === 'cube') {
+    if (TETROMINO_TYPES.has(type)) {
+        const unit = Number.isFinite(+width) ? +width : 20;
+        mesh = buildTetrominoMesh(type, unit, material);
+    } else if (type === 'cube') {
         const outer = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
-        
         if (hasHole) {
             const inner = new THREE.Mesh(new THREE.BoxGeometry(holeWidth, holeHeight, depth + 2), material);
             outer.updateMatrix();
@@ -326,41 +427,76 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
             mesh = outer;
         }
     } else if (type === 'lshape') {
-        const mat = material;
+        const EPS = 0.02;
+        const seatT   = Math.max(2, height * 0.22);       // 座面厚度
+        const longLen = Math.max(6, width  * 0.95);       // 往右的長座長度 (X+)
+        const longD   = Math.max(6, depth  * 0.30);       // 長座的前後厚度 (Z)
+        const shortW  = Math.max(6, width  * 0.50);       // 往前的短座寬度 (X)
+        const shortLen= Math.max(6, depth  * 0.55);       // 短座長度 (Z+)
 
-        const verticalBox = new THREE.Mesh(
-            new THREE.BoxGeometry(width * 0.4, height, depth), mat
-        );
-        verticalBox.position.set(-width * 0.3, 0, 0);
+        const colW = Math.max(6, width  * 0.34);          // 椅背寬 (X)
+        const colD = Math.max(6, depth  * 0.42);          // 椅背厚 (Z)
+        const colH = Math.max(8, height - seatT);         // 椅背高 (由座面向上)
 
-        const horizontalBox = new THREE.Mesh(
-            new THREE.BoxGeometry(width, height * 0.4, depth), mat
-        );
-        horizontalBox.position.set(0, -height * 0.3, 0);
+        // 以群組中心為幾何中心，底面位於 y = -height/2
+        const y0 = -height / 2;
 
-        const lGroup = new THREE.Group();
-        lGroup.add(verticalBox);
-        lGroup.add(horizontalBox);
-        mesh = lGroup;
+        // 椅背：放在座面交會處左側一點，視覺更像圖片
+        const back = new THREE.Mesh(new THREE.BoxGeometry(colW, colH, colD), material);
+        back.position.set(0, y0 + seatT + colH / 2, 0);
 
-        if (hasHole) {
-            const holeBox = new THREE.Mesh(
-                new THREE.BoxGeometry(holeWidth, holeHeight, depth + 2), mat
-            );
-            holeBox.position.set(0, 0, 0);
-            try {
-                lGroup.updateMatrixWorld(true);
-                holeBox.updateMatrix();
-                mesh = CSG.subtract(lGroup, holeBox);
-                mesh.geometry.computeVertexNormals();
-                mesh.material = material;
-            } catch (err) {
-                console.error("CSG subtraction failed:", err);
-                mesh = lGroup;
+        // 往右的「長座」：從椅背右側向 +X 伸出
+        const seatRight = new THREE.Mesh(new THREE.BoxGeometry(longLen, seatT, longD), material);
+        seatRight.position.set(back.position.x + colW / 2 + longLen / 2 - EPS, y0 + seatT / 2, 0);
+
+        // 往前的「短座」：從椅背前側向 +Z 伸出（略窄）
+        const seatFront = new THREE.Mesh(new THREE.BoxGeometry(shortW, seatT, shortLen), material);
+        seatFront.position.set(back.position.x, y0 + seatT / 2, back.position.z + colD / 2 + shortLen / 2 - EPS);
+
+        try {
+            let combined = CSG.union(back, seatRight);
+            combined = CSG.union(combined, seatFront);
+            combined.geometry.computeVertexNormals();
+            combined.material = material;
+
+            // （選用）在座面挖孔
+            if (hasHole) {
+                const holeBox = new THREE.Mesh(
+                    new THREE.BoxGeometry(
+                        Math.min(holeWidth  || shortW * 0.6, shortW * 0.9),
+                        Math.min(holeHeight || seatT  * 0.8, seatT  * 0.95),
+                        Math.min(longD * 0.85, longD - 1)
+                    ),
+                    material
+                );
+                // 孔放在右側長座中央偏靠立柱
+                holeBox.position.set(
+                    seatRight.position.x - longLen * 0.25,
+                    seatRight.position.y,
+                    seatRight.position.z
+                );
+                combined = CSG.subtract(combined, holeBox);
+                combined.geometry.computeVertexNormals();
+                combined.material = material;
             }
+                mesh = combined;
+        } catch (err) {
+            console.warn('CSG 合併失敗，退回群組（仍含 EPS 重疊防縫）：', err);
+            const group = new THREE.Group();
+            group.add(back, seatRight, seatFront);
+            mesh = group;
         }
+    } else {
+        // fallback
+        mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
     }
-    const box = new THREE.Box3().setFromObject(mesh);
+    if (!placeInsideContainer(mesh)) {
+        console.warn('⚠️ 容器已滿或放置失敗');
+    }
+    mesh.userData.type = 'custom';
+    mesh.userData.originalY = mesh.position.y;
+}
+/*     const box = new THREE.Box3().setFromObject(mesh);
     const size = new THREE.Vector3();
     box.getSize(size);
     const containerBox = new THREE.Box3().setFromObject(container);
@@ -397,7 +533,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         }
         if (placed) break;
     }
-}
+} */
 
 let isDragging = false;
 let currentTarget = null;
@@ -417,7 +553,7 @@ renderer.domElement.addEventListener('mousedown', (event) => {
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
 
-    const intersects = raycaster.intersectObjects(objects.filter(obj => obj.userData.type === 'custom'), true);
+    const intersects = raycaster.intersectObjects(objects, true);
     if (intersects.length === 0 ) {
         if (event.button === 0 && !event.shiftKey) {
             selectedObj = null;
@@ -578,9 +714,7 @@ renderer.domElement.addEventListener('wheel', (event) => {
 
 document.getElementById('shapeType').addEventListener('change', (e) => {
     const value = e.target.value;
-    document.getElementById('boxParams').style.display = (value === 'cube') ? 'block' : 'none';
-    document.getElementById('sphereParams').style.display = (value === 'circle') ? 'block' : 'none';
-    document.getElementById('customParams').style.display = (value === 'lshape') ? 'block' : 'none';
+    updateParamVisibility(value);
 });
 
 document.getElementById('hasHole').addEventListener('change', (e) => {
@@ -607,11 +741,15 @@ document.getElementById('generate').addEventListener('click', () => {
         width = parseFloat(document.getElementById('customWidth').value || 20);
         height = parseFloat(document.getElementById('customHeight').value || 20);
         depth = parseFloat(document.getElementById('customDepth').value || 20);
+    } else if (TETROMINO_TYPES.has(type)) {
+        width = parseFloat(document.getElementById('boxWidth').value || 20); // 單位邊長
+        height = depth = width;
     }
     createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
     addToLibrary({ type, width, height, depth, color, hasHole, holeWidth, holeHeight });
     clearFormFields();
 });
+
 function animate(time) {
     requestAnimationFrame( animate );
     controls.update();
@@ -655,7 +793,9 @@ window.addEventListener('DOMContentLoaded', () => {
             document.getElementById('shapeType').value = result.type;
             document.getElementById('shapeType').dispatchEvent(new Event('change'));
             set("color", result.color); 
-            if (result.type === "cube") {
+            if (TETROMINO_TYPES.has(result.type)) {
+                set("boxWidth", result.width);
+            } else if (result.type === "cube") {
                 set("boxWidth", result.width);
                 set("boxHeight", result.height);
                 set("boxDepth", result.depth);
@@ -666,8 +806,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 set("customHeight", result.height);
                 set("customDepth", result.depth);
             }
-            document.getElementById("hasHole").checked = result.hasHole;
-            if (result.hasHole) {
+            document.getElementById("hasHole").checked = !!result.hasHole && !TETROMINO_TYPES.has(result.type);
+            if (result.hasHole && !TETROMINO_TYPES.has(result.type)) {
                 set("holeWidth", result.holeWidth);
                 set("holeHeight", result.holeHeight);
             } else {

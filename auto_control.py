@@ -30,9 +30,12 @@ def extract_params():
         "黃": "#ffff00", "黃色": "#ffff00",
         "紫": "#800080", "紫色": "#800080",
         "白": "#ffffff", "白色": "#ffffff",
-        "黑": "#000000", "黑色": "#000000"
+        "黑": "#000000", "黑色": "#000000",
+        "橘": "#ffa500", "橘色": "#ffa500",
+        "灰": "#808080", "灰色": "#808080",
+        "粉紅": "#ffc0cb", "粉紅色": "#ffc0cb",
     }
-    color_match = re.search(r"(紅|綠|藍|黃|紫|白|黑)(色)?", text)
+    color_match = re.search(r"(紅|綠|藍|黃|紫|白|黑|橘|灰|粉紅)(色)?", text)
     color_key = color_match.group(0) + "色" if color_match and not color_match.group(0).endswith("色") else color_match.group(0)
     color = color_map.get(color_key, "#00ff00")
     print("🟡 color key：", color_key)
@@ -44,6 +47,7 @@ def extract_params():
         "width": extract(r"寬(?:度)?\D*(\d+)"),
         "height": extract(r"高(?:度)?\D*(\d+)"),
         "depth": extract(r"深(?:度)?\D*(\d+)"),
+        "radius": extract(r"半徑(?:度)?\D*(\d+)"),
         "color": color, 
         "hasHole": "有洞" in text,
         "holeWidth": extract(r"洞寬\D*(\d+)"),
@@ -83,7 +87,7 @@ def fill_form_with_selenium(driver, data):
         driver.find_element(By.ID, "boxHeight").send_keys(str(data["height"]))
         driver.find_element(By.ID, "boxDepth").send_keys(str(data["depth"]))
     elif data["type"] == "circle":
-        driver.find_element(By.ID, "sphereWidth").send_keys(str(data["width"]))
+        driver.find_element(By.ID, "sphereWidth").send_keys(str(data["radius"]))
     elif data["type"] == "lshape":
         driver.find_element(By.ID, "customWidth").send_keys(str(data["width"]))
         driver.find_element(By.ID, "customHeight").send_keys(str(data["height"]))
