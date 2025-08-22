@@ -1,9 +1,7 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import NoAlertPresentException
-from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.support import expected_conditions as EC
 import time
 import re
@@ -70,6 +68,10 @@ def wait_for_recognize_button(driver):
             driver.execute_script("arguments[0].setAttribute('data-clicked','false');", btn)
             return
         time.sleep(1)
+        #if btn.is_enabled():
+            #btn.click()
+            #return
+        #WebDriverWait(driver, 0.2).until(lambda d: btn.is_enabled())
 
 def fill_form_with_selenium(driver, data):
     shape_element = driver.find_element(By.ID, "shapeType")
@@ -80,6 +82,10 @@ def fill_form_with_selenium(driver, data):
         colorInput.value = arguments[0];
         colorInput.dispatchEvent(new Event('input'));
     """, data["color"])
+    #driver.execute_script("const el=document.getElementById('color'); el.value=arguments[0]; el.dispatchEvent(new Event('input'));", data["color"])
+
+    #driver.execute_script("document.getElementById('shapeType').value=arguments[0];", data["type"])
+    #driver.execute_script("document.getElementById('shapeType').dispatchEvent(new Event('change'));")
 
     if data["type"] == "cube":
         shape = driver.find_element(By.ID, "shapeType")

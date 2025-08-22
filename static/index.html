@@ -125,13 +125,15 @@
         </div>
         <button id="generate">產生物體</button>
         <button id="recognizeBtn" onclick="this.setAttribute('data-clicked', 'true')">辨識參數</button>
+        <button id="optimizeBtn" class="btn">最佳化擺放</button>
+        <button id="stopOptimizeBtn" class="btn">停止最佳化</button>
     </div>
     <aside id="library">
       <h3>物體清單</h3>
-      <div id="libraryList"></div>
+      <div id="libraryList" style="font-size:14px; color:#333;"></div>
     </aside>
 
-    <img id="video" src="http://127.0.0.1:5000/get-camera-frame" alt="攝影機畫面" />
+    <img id="video" src="/get-camera-frame" alt="攝影機畫面" />
 
     <script type="module" src="/static/main.js"></script>
     <script>
@@ -147,8 +149,8 @@
 
         // 依剩餘空間調整高度（最少 160px，最多 340px）
         const maxH = window.innerHeight - (r.bottom + 20);
-        const h = Math.max(220, Math.min(460, maxH));
-        lib.style.height = h + 'px';
+        //const h = Math.max(220, Math.min(460, maxH));
+        lib.style.height = Math.max(220, Math.min(460, maxH)) + 'px';
       }
       window.addEventListener('load', placeLibrary);
       window.addEventListener('resize', placeLibrary);
