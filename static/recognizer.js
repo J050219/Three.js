@@ -29,7 +29,6 @@ function hideToast() {
   const el = document.getElementById('toast');
   if (el) el.style.display = 'none';
 }
-
 function normalizeColor(input) {
   const map = {
     '紅': '#ff0000', '紅色': '#ff0000',
@@ -48,15 +47,12 @@ function normalizeColor(input) {
   const hex = map[input.trim()];
   return hex || '#00ff00';
 }
-
 function pickNumber(text, regex, fallback = 20) {
   const m = text.match(regex);
   return m ? parseFloat(m[1]) : fallback;
 }
-
 export async function createRecognizer(videoElement) {
     let busy = false; 
-
     return async function recognize(callback) {
         if (busy) return; 
         busy = true;
@@ -77,7 +73,6 @@ export async function createRecognizer(videoElement) {
             const text = String(resJson.text || '');
             console.log('辨識結果:', text);
             window.__recognizeResult = text;
-            
             const extract = (regex) => {
                 const match = text.match(regex);
                 return match ? parseFloat(match[1]) : 20;
@@ -106,16 +101,13 @@ export async function createRecognizer(videoElement) {
                 holeWidth:  extract(/(?:洞寬|孔寬)\D*(\d+(?:\.\d+)?)/i, 10),
                 holeHeight: extract(/(?:洞高|孔高)\D*(\d+(?:\.\d+)?)/i, 10)
             };
-            // 四格方塊：僅需要「單位邊長 = width」
             if (['tI','tT','tZ','tL'].includes(type)){
               result.height = result.depth = result.width || 20;
               result.hasHole = false;
             }
-            // 球體：把 width 視為直徑
             if (type==='circle'){ result.height=result.depth=result.width||20; }
             showToast('✅ 辨識成功，已套用參數');
             setTimeout(hideToast, 800);
-
             if (typeof callback === 'function') callback(result);
         } catch (err) {
             console.error('辨識錯誤:', err);

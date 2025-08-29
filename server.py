@@ -7,7 +7,6 @@ from flask_cors import CORS
 
 OVIS_URL = os.environ.get("OVIS_URL", "http://192.168.178.151:5678/webhook/mcp")
 OVIS_TIMEOUT = float(os.environ.get("OVIS_TIMEOUT", "6.0"))
-
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
 os.makedirs("captured_images", exist_ok=True)

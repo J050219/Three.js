@@ -104,15 +104,6 @@ def wait_for_recognize_button(driver):
             time.sleep(0.5)
 
 def fill_form_with_selenium(driver, data):
-    #shape_element = driver.find_element(By.ID, "shapeType")
-    #driver.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('change'));", shape_element, data["type"])
-    #driver.find_element(By.ID, "color").clear()
-    #driver.execute_script("""
-        #const colorInput = document.getElementById('color');
-        #colorInput.value = arguments[0];
-        #colorInput.dispatchEvent(new Event('input'));
-    #""", data["color"])
-
     def set_val(eid, val, evt = "input"):
         driver.execute_script(
             "var el=document.getElementById(arguments[0]);"
@@ -133,14 +124,12 @@ def fill_form_with_selenium(driver, data):
             set_val("boxHeight", data["height"])
             set_val("boxDepth", data["depth"])
     elif data["type"] == "circle":
-        # 前端的球體欄位名為 sphereWidth（直徑）
         set_val("sphereWidth", data["width"])
     elif data["type"] == "lshape":
         set_val("customWidth", data["width"])
         set_val("customHeight", data["height"])
         set_val("customDepth", data["depth"])
 
-    # 孔洞（只有 cube / circle / lshape 可用）
     if data.get("hasHole") and data["type"] in ("cube", "circle", "lshape"):
         driver.execute_script("var c=document.getElementById('hasHole'); if(c && !c.checked){c.click();}")
         WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.ID, "holeWidth")))
@@ -149,13 +138,12 @@ def fill_form_with_selenium(driver, data):
     else:
         driver.execute_script("var c=document.getElementById('hasHole'); if(c && c.checked){c.click();}")
 
-    # 產生
     driver.execute_script("document.getElementById('generate').click();")
     print("✅ 已將辨識結果填入並產生模型")
 
 def main():
     chrome_options = Options()
-    chrome_options.add_argument("--use-fake-ui-for-media-stream")  # 允許存取相機
+    chrome_options.add_argument("--use-fake-ui-for-media-stream") 
     driver = webdriver.Chrome(options=chrome_options)
     driver.set_window_size(1280, 900)
     driver.get("http://localhost:5000")

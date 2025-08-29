@@ -4,7 +4,6 @@
     <meta charset="utf-8">
     <title>產生物體</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-
     <script async src="https://unpkg.com/es-module-shims@1/dist/es-module-shims.js"></script>
     <script type="importmap">
       {
@@ -16,7 +15,6 @@
         }
       }
     </script>
-
     <style>
       * { box-sizing: border-box; }
       body { margin: 0; overflow: hidden; background: black; font-family: system-ui, sans-serif; }
@@ -49,7 +47,6 @@
         border-color: #9aa4b2;
       }
       #optBar .btn:hover{ filter: brightness(1.08); }
-
       #ui {
         position: absolute;
         top: 60px;
@@ -75,7 +72,6 @@
         overflow: hidden;
         flex-direction: column;
         color: #111;
-
       }
       #library h3 { margin: 0 0 8px; font-size: 16px; }
       #libraryList {flex: 1 1 auto; overflow: auto; display: block;}
@@ -83,8 +79,6 @@
       #libraryList .row { font-size: 12px; color:#555; margin-top: 4px; display:flex; align-items:center; gap:6px; }
       #libraryList .chip { width:14px; height:14px; border-radius:3px; border:1px solid #ccc; display:inline-block; }
       #libraryList .btn {margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 6px; border: 0; background:#0ea5e9; color:#fff; cursor:pointer;}
-      /* label { display: block; margin: 5px 0; }
-      input[type="number"] { width: 80px; } */
       #video {
         position: absolute;
         bottom: 10px;
@@ -121,26 +115,21 @@
             <input id="boxHeight" type="number" placeholder="高 (Height)" />
             <input id="boxDepth" type="number" placeholder="深 (Depth)" />
           </div>
-
           <div id="sphereParams" class="param-group" style="display:none;">
             <input id="sphereWidth" type="number" placeholder="直徑 (Diameter)" />
           </div>
-
           <div id="customParams" class="param-group" style="display:none;">
             <input id="customWidth" type="number" placeholder="寬 (Width)" />
             <input id="customHeight" type="number" placeholder="高 (Height)" />
             <input id="customDepth" type="number" placeholder="厚度 (Depth)" />
           </div>
-
           <label>
             顏色：
             <input id="color" type="color" value="#00ff00" />
           </label>
-
           <label>
             <input type="checkbox" id="hasHole" /> 是否簍空
           </label>
-
           <div id="holeInput" style="display:none;">
             <input id="holeWidth" type="number" placeholder="孔寬 (Hole Width)" />
             <input id="holeHeight" type="number" placeholder="孔高 (Hole Height)" />
@@ -154,9 +143,7 @@
           <h3>物體清單</h3>
           <div id="libraryList"></div>
         </aside>
-
         <img id="video" src="/get-camera-frame" alt="攝影機畫面" />
-
         <script type="module" src="/static/main.js"></script>
         <script>
         function placeLibrary() {
@@ -164,16 +151,10 @@
           const lib = document.getElementById('library');
           if (!ui || !lib) return;
           const r = ui.getBoundingClientRect();
-
           lib.style.left = r.left + 'px';
           lib.style.top  = (r.bottom + 10) + 'px';
           lib.style.width = r.width + 'px';
           lib.style.height = Math.max(220, Math.min(460, window.innerHeight - (r.bottom + 20))) + 'px';
-          /* 
-          // 依剩餘空間調整高度（最少 160px，最多 340px）
-          const maxH = window.innerHeight - (r.bottom + 20);
-          //const h = Math.max(220, Math.min(460, maxH));
-           */
         }
         addEventListener('load', placeLibrary);
         addEventListener('resize', placeLibrary);
