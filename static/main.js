@@ -7,8 +7,10 @@ import TWEEN from '@tweenjs/tween.js';
 
 const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
 const LIB_KEY = 'recognizedLibrary';
+const UNDER_AUTOMATION = (typeof navigator !== 'undefined') && navigator.webdriver === true;
 
 const TETROMINO_TYPES = new Set(['tI','tT','tZ','tL']);
+
 function typeLabel(t) {
   switch (t) {
     case 'tI': return 'I 形方塊';
@@ -24,16 +26,21 @@ function typeLabel(t) {
 
 function getLibrarySafe() {
     let arr;
-    try { arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); }
-    catch { arr = []; }
-    if (!Array.isArray(arr)) arr = [];
-    return arr;
+    try { 
+        arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); 
+        return Array.isArray(arr)?arr:[];
+    } catch { 
+        return [];
+    }
 }
 const library = getLibrarySafe();
 
 function saveLibrary() {
-    try { localStorage.setItem(LIB_KEY, JSON.stringify(library)); }
-    catch (e) { console.warn('localStorage 寫入失敗:', e); }
+    try { 
+        localStorage.setItem(LIB_KEY, JSON.stringify(library)); 
+    }catch (e) { 
+        console.warn('localStorage 寫入失敗:', e); 
+    }
 }
 
 function summarize(item) {
@@ -119,7 +126,7 @@ function normalizeColor(input) {
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
@@ -159,6 +166,23 @@ const containerEdges = new THREE.LineSegments(
 );
 container.add(containerEdges);
 scene.add(container);
+
+ //暫時存放區
+const stagingSize = 100;
+const stagingPad = new THREE.Mesh(new THREE.BoxGeometry(stagingSize, 8, stagingSize), new THREE.MeshBasicMaterial({ color: 0x777777 }));
+const containerWidth = containerGeometry.parameters.width;
+stagingPad.position.set(container.position.x + containerWidth / 2 + stagingSize / 2 + 20, -6, container.position.z);
+scene.add(stagingPad);
+
+const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 80, stagingSize);
+const stageFrameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent : true, opacity : 0.15, side : THREE.DoubleSide });
+const stagingFrame = new THREE.Mesh(stageFrameGeo, stageFrameMat);
+stagingFrame.position.set(stagingPad.position.x, stagingPad.position.y + 40, stagingPad.position.z);
+stagingFrame.add(new THREE.LineSegments(
+  new THREE.EdgesGeometry(stageFrameGeo),
+  new THREE.LineBasicMaterial({ color: 0x00ffff })
+));
+scene.add(stagingFrame);
 
 const objects = [];
 let selectedObj = null;
@@ -210,9 +234,7 @@ function ensureSceneButtons() {
     }
 }
 
-window.addEventListener('keydown', (e) => {
-    if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected();
-});
+addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected(); });
 
 function buildTetrominoMesh(kind, unit, material) {
   const group = new THREE.Group();
@@ -236,6 +258,7 @@ function buildTetrominoMesh(kind, unit, material) {
   group.children.forEach(c => {
     c.position.sub(center);
   });
+  /* group.position.sub(center); */
   group.userData.unit = unit;
   return group;
 }
@@ -249,36 +272,28 @@ function updateParamVisibility(type = document.getElementById('shapeType')?.valu
 
     const isTet = TETROMINO_TYPES.has(type);
 
-    if (isTet) {
-        box.style.display    = 'block';
-        sphere.style.display = 'none';
-        custom.style.display = 'none';
-        hole.style.display = 'none';
-        const w = document.getElementById('boxWidth');
-        const h = document.getElementById('boxHeight');
-        const d = document.getElementById('boxDepth');
-        if (w) { w.placeholder = '單位邊長'; w.style.display = 'block'; }
-        if (h) { h.value = ''; h.style.display = 'none'; }
-        if (d) { d.value = ''; d.style.display = 'none'; }
-
-        const chk = document.getElementById('hasHole');
-        if (chk) chk.checked = false;
-        hole.style.display = 'none';
-        return;
-    }
-    box.style.display = (type === 'cube') ? 'block' : 'none';
+    // 形狀區塊
+    box.style.display    = (type === 'cube' || isTet) ? 'block' : 'none';
     sphere.style.display = (type === 'circle') ? 'block' : 'none';
     custom.style.display = (type === 'lshape') ? 'block' : 'none';
 
-    if (type === 'cube') {
-        ['boxWidth','boxHeight','boxDepth'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.style.display = 'block';
-        });
-        hole.style.display = (document.getElementById('hasHole').checked ? 'block' : 'none');
-    } else {
-        hole.style.display = 'none';
+    // 四格方塊：只有「單位邊長」
+    const w = document.getElementById('boxWidth');
+    const h = document.getElementById('boxHeight');
+    const d = document.getElementById('boxDepth');
+    if (isTet) {
+        if (w) { w.placeholder = '單位邊長'; w.style.display = 'block'; }
+        if (h) { h.value = ''; h.style.display = 'none'; }
+        if (d) { d.value = ''; d.style.display = 'none'; }
+    } else if (type === 'cube') {
+        if (w) w.style.display = 'block';
+        if (h) h.style.display = 'block';
+        if (d) d.style.display = 'block';
     }
+
+    // 孔洞（非四格方塊皆可；是否展開由核取狀態決定）
+    const chk = document.getElementById('hasHole');
+    hole.style.display = (!isTet && chk?.checked) ? 'block' : 'none';
 }
 
 function clearFormFields() {
@@ -340,6 +355,63 @@ function findRestingY(object) {
         y += 0.5;
     }
     return object.position.y;
+}
+
+// 依 XZ 判定現在落在哪個區域
+function getAreaByXZ(x, z) {
+  const cbox = new THREE.Box3().setFromObject(container);
+  if (x >= cbox.min.x && x <= cbox.max.x && z >= cbox.min.z && z <= cbox.max.z) return 'container';
+
+  const halfW = stagingPad.geometry.parameters.width / 2;
+  const halfD = stagingPad.geometry.parameters.depth / 2;
+  const sxmin = stagingPad.position.x - halfW, sxmax = stagingPad.position.x + halfW;
+  const szmin = stagingPad.position.z - halfD, szmax = stagingPad.position.z + halfD;
+  if (x >= sxmin && x <= sxmax && z >= szmin && z <= szmax) return 'staging';
+
+  return null;
+}
+
+// 取得某區域的 XZ 可移動邊界與 Y 上下限（給拖曳夾具用）
+function getBoundsForArea(area, half) {
+  if (area === 'container') {
+    const cb = new THREE.Box3().setFromObject(container);
+    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+    return {
+      minX: cb.min.x + half.x, maxX: cb.max.x - half.x,
+      minZ: cb.min.z + half.z, maxZ: cb.max.z - half.z,
+      minY: palletTop + half.y, maxY: cb.max.y - half.y,
+      baseY: palletTop
+    };
+  } else if (area === 'staging') {
+    const halfW = stagingPad.geometry.parameters.width / 2;
+    const halfD = stagingPad.geometry.parameters.depth / 2;
+    const baseY = stagingPad.position.y + stagingPad.geometry.parameters.height / 2;
+    return {
+      minX: stagingPad.position.x - halfW + half.x,
+      maxX: stagingPad.position.x + halfW - half.x,
+      minZ: stagingPad.position.z - halfD + half.z,
+      maxZ: stagingPad.position.z + halfD - half.z,
+      minY: baseY + half.y,
+      maxY: baseY + 200 - half.y,   // 暫存台上允許堆到 ~200 高
+      baseY
+    };
+  }
+  // 落到其它地方：允許自由，但 Y 以棧板頂為基準
+  const baseY = pallet.position.y + pallet.geometry.parameters.height / 2;
+  return { minX: -Infinity, maxX: Infinity, minZ: -Infinity, maxZ: Infinity, minY: baseY + half.y, maxY: baseY + 200 - half.y, baseY };
+}
+
+// 在指定區域內計算「落地」Y（包含堆疊）
+function findRestingYForArea(object, area, half) {
+  const { baseY, maxY } = getBoundsForArea(area, half);
+  const clone = object.clone();
+  let y = baseY + half.y;
+  while (y <= maxY) {
+    clone.position.set(object.position.x, y, object.position.z);
+    if (!isOverlapping(clone, object)) return y;
+    y += 0.5;
+  }
+  return object.position.y;
 }
 
 /* =====================  模擬退火擺放最佳化  ===================== */
@@ -663,6 +735,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
     mesh.userData.originalY = mesh.position.y;
 }
 
+
 let isDragging = false;
 let currentTarget = null;
 let offset = new THREE.Vector3();
@@ -706,7 +779,13 @@ renderer.domElement.addEventListener('mousedown', (event) => {
 
     if (event.button === 0) {
         const jumpHeight = 10;
-        const originalY = findRestingY(currentTarget);
+        //const originalY = findRestingY(currentTarget);
+        const targBox = new THREE.Box3().setFromObject(currentTarget);
+        const tsize = new THREE.Vector3(); targBox.getSize(tsize);
+        const half = tsize.clone().multiplyScalar(0.5);
+        const areaNow = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+        const originalY = findRestingYForArea(currentTarget, areaNow, half);
+
         const jumpUp = new TWEEN.Tween(currentTarget.position)
             .to({ y: originalY + jumpHeight }, 150)
             .easing(TWEEN.Easing.Quadratic.Out);
@@ -733,6 +812,14 @@ renderer.domElement.addEventListener('mouseup', () => {
         isRotating = false;
         controls.enabled = true;
     }
+    if (selectedObj) {
+        const sb = new THREE.Box3().setFromObject(selectedObj);
+        const s = new THREE.Vector3();
+        sb.getSize(s);
+        const half = s.clone().multiplyScalar(0.5);
+        const area = getAreaByXZ(selectedObj.position.x, selectedObj.position.z) || 'container';
+        selectedObj.position.y = findRestingYForArea(selectedObj, area, half);
+    }
 });
 
 renderer.domElement.addEventListener('mousemove',(event) =>{
@@ -748,25 +835,27 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
-    const containerBox = new THREE.Box3().setFromObject(container);
+    //const containerBox = new THREE.Box3().setFromObject(container);
     const targetBox = new THREE.Box3().setFromObject(currentTarget);
     const targetSize = new THREE.Vector3();
     targetBox.getSize(targetSize);
     const halfSize = targetSize.clone().multiplyScalar(0.5);
-    const minX = containerBox.min.x + halfSize.x;
+    /* const minX = containerBox.min.x + halfSize.x;
     const maxX = containerBox.max.x - halfSize.x;
     const minZ = containerBox.min.z + halfSize.z;
     const maxZ = containerBox.max.z - halfSize.z;
     const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
     const minY = Math.max(containerBox.min.y + halfSize.y, palletTop + halfSize.y - halfSize.y);
     const maxY = containerBox.max.y - halfSize.y;
-
+ */
     if (!spaceDown) {
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
             const newPos = planeIntersect.clone().sub(offset);
-            newPos.x = THREE.MathUtils.clamp(newPos.x, minX, maxX);
-            newPos.z = THREE.MathUtils.clamp(newPos.z, minZ, maxZ);
+            const area = getAreaByXZ(newPos.x, newPos.z) || getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+            const b = getBoundsForArea(area, halfSize);
+            newPos.x = THREE.MathUtils.clamp(newPos.x, b.minX, b.maxX);
+            newPos.z = THREE.MathUtils.clamp(newPos.z, b.minZ, b.maxZ);
             const testBox = currentTarget.clone();
             testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
             if (!isOverlapping(testBox, currentTarget)) {
@@ -774,8 +863,10 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
             }
         }
     } else {
-        const dy = (lastMouseY - event.clientY) * 0.1; 
-        let newY = THREE.MathUtils.clamp(currentTarget.position.y + dy, minY, maxY);
+        const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+        const b = getBoundsForArea(area, halfSize);
+        const dy = (lastMouseY - event.clientY) * 0.1;
+        let newY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
         const testBox = currentTarget.clone();
         testBox.position.set(currentTarget.position.x, newY, currentTarget.position.z);
         if (!isOverlapping(testBox, currentTarget)) {
@@ -792,13 +883,15 @@ function nudgeSelectedByArrow(code) {
     const sb = new THREE.Box3().setFromObject(selectedObj);
     const size = new THREE.Vector3(); sb.getSize(size);
     const half = size.clone().multiplyScalar(0.5);
-    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+    /* const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
     const minX = containerBox.min.x + half.x;
     const maxX = containerBox.max.x - half.x;
     const minZ = containerBox.min.z + half.z;
     const maxZ = containerBox.max.z - half.z;
     const minY = Math.max(containerBox.min.y + half.y, palletTop + half.y - half.y);
-    const maxY = containerBox.max.y - half.y;
+    const maxY = containerBox.max.y - half.y; */
+    const area = getAreaByXZ(selectedObj.position.x, selectedObj.position.z) || 'container';
+    const b = getBoundsForArea(area, half);
     let nx = selectedObj.position.x;
     let ny = selectedObj.position.y;
     let nz = selectedObj.position.z;
@@ -811,9 +904,9 @@ function nudgeSelectedByArrow(code) {
         if (code === 'ArrowUp') nz -= step;
         if (code === 'ArrowDown') nz += step;
     }
-    nx = THREE.MathUtils.clamp(nx, minX, maxX);
-    ny = THREE.MathUtils.clamp(ny, minY, maxY);
-    nz = THREE.MathUtils.clamp(nz, minZ, maxZ);
+    nx = THREE.MathUtils.clamp(nx, b.minX, b.maxX);
+    ny = THREE.MathUtils.clamp(ny, b.minY, b.maxY);
+    nz = THREE.MathUtils.clamp(nz, b.minZ, b.maxZ);
     const test = selectedObj.clone();
     test.position.set(nx, ny, nz);
     if (!isOverlapping(test, selectedObj)) {
@@ -832,12 +925,16 @@ window.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceDown = fa
 
 renderer.domElement.addEventListener('wheel', (event) => {
     const zoomSpeed = 1.1;
-    if (event.deltaY < 0) {
-        camera.position.multiplyScalar(1 / zoomSpeed);
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    const step = (event.deltaY < 0 ? -1 : 1) * 5;
+    camera.position.addScaledVector(dir, step * zoomSpeed);
+    /* if (event.deltaY < 0) {
+        camera.position.addScaledVector(dir, zoomSpeed);
     } else {
-        camera.position.multiplyScalar(zoomSpeed);
+        camera.position.addScaledVector(dir, 1 / zoomSpeed);
     }
-    camera.position.z = THREE.MathUtils.clamp(camera.position.z, 20, 300);
+    camera.position.z = THREE.MathUtils.clamp(camera.position.z, 20, 300); */
 });
 
 document.getElementById('shapeType').addEventListener('change', (e) => {
@@ -846,7 +943,8 @@ document.getElementById('shapeType').addEventListener('change', (e) => {
 });
 
 document.getElementById('hasHole').addEventListener('change', (e) => {
-    document.getElementById('holeInput').style.display = e.target.checked ? 'block' : 'none';
+    /* document.getElementById('holeInput').style.display = e.target.checked ? 'block' : 'none'; */
+    updateParamVisibility();
 });
 
 document.getElementById('generate').addEventListener('click', () => {
@@ -899,6 +997,8 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 (async () => {
+    if (UNDER_AUTOMATION) { renderLibrary(); return; } 
+    const recognize = await createRecognizer();
     document.getElementById('recognizeBtn').addEventListener('click', () => {
         recognize((result) => {
             addToLibrary(result);
@@ -927,12 +1027,22 @@ window.addEventListener('DOMContentLoaded', () => {
                 set("customHeight", result.height);
                 set("customDepth", result.depth);
             }
-            document.getElementById("hasHole").checked = !!result.hasHole && !TETROMINO_TYPES.has(result.type);
+            /* document.getElementById("hasHole").checked = !!result.hasHole && !TETROMINO_TYPES.has(result.type);
             if (result.hasHole && !TETROMINO_TYPES.has(result.type)) {
                 set("holeWidth", result.holeWidth);
                 set("holeHeight", result.holeHeight);
             } else {
                 document.getElementById('holeInput').style.display = 'none';
+            } */
+            const canHole = !TETROMINO_TYPES.has(result.type);
+            const holeChk = document.getElementById('hasHole');
+            if (holeChk) {
+                holeChk.checked = canHole && !!result.hasHole;
+                holeChk.dispatchEvent(new Event('change'));   // 關鍵：讓 updateParamVisibility 生效
+            }
+            if (canHole && result.hasHole) {
+                set('holeWidth',  result.holeWidth);
+                set('holeHeight', result.holeHeight);
             }
             setTimeout(() => {
                 document.getElementById("generate").click();
@@ -940,5 +1050,5 @@ window.addEventListener('DOMContentLoaded', () => {
             }, 100);
         });
     });
+    renderLibrary();
 })();
-renderLibrary();

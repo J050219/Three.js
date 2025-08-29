@@ -5,6 +5,9 @@ import requests
 import os
 from flask_cors import CORS
 
+OVIS_URL = os.environ.get("OVIS_URL", "http://192.168.178.151:5678/webhook/mcp")
+OVIS_TIMEOUT = float(os.environ.get("OVIS_TIMEOUT", "6.0"))
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
 os.makedirs("captured_images", exist_ok=True)
@@ -28,8 +31,8 @@ def static_node_modules(filename):
             cand = root + suf
             if os.path.exists(cand):
                 return send_from_directory(base, filename + suf)
-
     return abort(404)
+
 camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 if not camera.isOpened():
     print("❌ 無法開啟攝影機")
@@ -45,12 +48,13 @@ def query_server(prompt, image_base64):
         "image_base64": image_base64
     }
     try:
-        response = requests.post("http://192.168.178.151:5678/webhook/mcp", json=payload)
+        r = requests.post(OVIS_URL, json=payload, timeout=OVIS_TIMEOUT) 
+        """ response = requests.post("http://192.168.178.151:5678/webhook/mcp", json=payload)
         print("🔧 status code:", response.status_code)
-        print("🧾 回應內容：", response.text)
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and 'response' in result[0]:
+        print("🧾 回應內容：", response.text) """
+        if r.status_code == 200:
+            result = r.json()
+            if isinstance(result, list) and result and isinstance(result[0], dict) and 'response' in result[0]:
                 return result[0]['response']
             elif isinstance(result, dict) and 'response' in result:
                 return result['response']
@@ -87,7 +91,14 @@ def recognize_from_camera():
         print("✅ 圖片已儲存：", image_path)
 
         image_base64 = encode_image_to_base64(image_path)
-        result = query_server("請辨識圖中的文字。", image_base64)
+        prompt = (
+            "請看圖中的單一物體，請用中文回覆一行，包含："
+            "形狀(立方體/球體/不規則或 tI/tT/tZ/tL)、顏色、"
+            "尺寸（立方/不規則給寬/高/深；球體給直徑）、"
+            "是否有孔洞；若有孔洞請加上『孔寬X、孔高Y』或『洞寬X、洞高Y』。"
+            "範例：綠色立方體，寬20，高12，深10，有孔，孔寬8，孔高6。"
+        )
+        result = query_server(prompt, image_base64)
 
         if result:
             return jsonify({"text": result})

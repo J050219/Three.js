@@ -8,18 +8,27 @@ import re
 import requests
 
 def extract_params():
-    res = requests.post("http://localhost:5000/ovis-recognize-from-camera")
-    res_json = res.json()
-    text = res_json.get("text")
+    try:
+        res = requests.post("http://localhost:5000/ovis-recognize-from-camera", timeout=15)
+        res.raise_for_status()
+        res_json = res.json()
+    except Exception as e:
+        print("❌ OVIS 呼叫失敗：", e)
+        return None
+    text = (res_json or {}).get("text", "")
     if not text:
         print("❌ 無辨識結果")
         return None
     
     print("📝 辨識結果：", text)
 
-    def extract(regex):
+    def extract(regex, default=20):
         match = re.search(regex, text)
-        return float(match.group(1)) if match else 20
+        try:
+            return float(match.group(1)) if match else default
+        except Exception as e:
+            print("❌ 提取參數時發生錯誤：", e)
+            return default
 
     color_map = {
         "紅": "#ff0000", "紅色": "#ff0000",
@@ -38,93 +47,135 @@ def extract_params():
     color = color_map.get(color_key, "#00ff00")
     print("🟡 color key：", color_key)
     print("🎨 color hex：", color)
-    return {
-        "type": "cube" if "cube" in text or "立方" in text else
-                 "circle" if "circle" in text or "球" in text else
-                 "lshape" if "L型" in text or "不規則" in text else "cube",
-        "width": extract(r"寬(?:度)?\D*(\d+)"),
-        "height": extract(r"高(?:度)?\D*(\d+)"),
-        "depth": extract(r"深(?:度)?\D*(\d+)"),
-        "radius": extract(r"半徑(?:度)?\D*(\d+)"),
-        "color": color, 
-        "hasHole": "有洞" in text,
-        "holeWidth": extract(r"洞寬\D*(\d+)"),
-        "holeHeight": extract(r"洞高\D*(\d+)"),
-    }
+    
+    t = ("tI" if re.search(r"I\s*形|I型", text) else
+         "tT" if re.search(r"T\s*形|T型", text) else
+         "tZ" if re.search(r"Z\s*形|Z型", text) else
+         "tL" if re.search(r"L\s*形|L型", text) else
+         "circle" if re.search(r"circle|球", text) else
+         "lshape" if re.search(r"不規則", text) else "cube")
+
+    w = extract(r"(?:寬|邊長|直徑|長|width)\D*(\d+(?:\.\d+)?)", 20)
+    h = extract(r"(?:高|height)\D*(\d+(?:\.\d+)?)", 20)
+    d = extract(r"(?:深|厚|depth)\D*(\d+(?:\.\d+)?)", 20)
+
+    has_hole = re.search(r"(有洞|有孔|孔洞|鏤空|簍空)", text, re.I) is not None
+    hole_w   = extract(r"(?:洞寬|孔寬|hole\s*width)\D*(\d+(?:\.\d+)?)", 10)
+    hole_h   = extract(r"(?:洞高|孔高|hole\s*height)\D*(\d+(?:\.\d+)?)", 10)
+
+    if t in ("tI","tT","tZ","tL"): h = d = w; has_hole = False
+    if t == "circle": h = d = w
+
+    return {"type":t, "width":w, "height":h, "depth":d,
+            "color":color, "hasHole":has_hole, "holeWidth":hole_w, "holeHeight":hole_h}
+
+def _ensure_button_click_hook(driver):
+    """在前端注入監聽：按下辨識按鈕時設定 data-clicked='true'"""
+    driver.execute_script("""
+    (function(){
+      const btn = document.getElementById('recognizeBtn');
+      if (!btn) return;
+      if (!btn.__hooked) {
+        btn.__hooked = true;
+        btn.addEventListener('click', () => btn.setAttribute('data-clicked','true'));
+      }
+    })();
+    """)
 
 def wait_for_recognize_button(driver):
+    btn = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "recognizeBtn")))
+    _ensure_button_click_hook(driver)
     print("🕓 等待點擊辨識參數按鈕...")
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "recognizeBtn")))
     while True:
         try:
-            WebDriverWait(driver, 0.1).until(EC.alert_is_present())
-            driver.switch_to.alert.accept()
-            continue
-        except:
-            pass
-
+            _ensure_button_click_hook(driver)
             btn = driver.find_element(By.ID, "recognizeBtn")
+            if btn.get_attribute("data-clicked") == "true":
+                driver.execute_script("arguments[0].setAttribute('data-clicked','false');", btn)
+                return
+            time.sleep(0.2)
+        except Exception as e:
+            print("❌ 等待辨識按鈕時發生錯誤：", e)
+
+            """ btn = driver.find_element(By.ID, "recognizeBtn")
         if btn.get_attribute("data-clicked") == "true":
             driver.execute_script("arguments[0].setAttribute('data-clicked','false');", btn)
-            return
-        time.sleep(1)
-        #if btn.is_enabled():
-            #btn.click()
-            #return
-        #WebDriverWait(driver, 0.2).until(lambda d: btn.is_enabled())
+            return """
+            time.sleep(0.5)
 
 def fill_form_with_selenium(driver, data):
-    shape_element = driver.find_element(By.ID, "shapeType")
-    driver.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('change'));", shape_element, data["type"])
-    driver.find_element(By.ID, "color").clear()
-    driver.execute_script("""
-        const colorInput = document.getElementById('color');
-        colorInput.value = arguments[0];
-        colorInput.dispatchEvent(new Event('input'));
-    """, data["color"])
-    #driver.execute_script("const el=document.getElementById('color'); el.value=arguments[0]; el.dispatchEvent(new Event('input'));", data["color"])
+    #shape_element = driver.find_element(By.ID, "shapeType")
+    #driver.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('change'));", shape_element, data["type"])
+    #driver.find_element(By.ID, "color").clear()
+    #driver.execute_script("""
+        #const colorInput = document.getElementById('color');
+        #colorInput.value = arguments[0];
+        #colorInput.dispatchEvent(new Event('input'));
+    #""", data["color"])
 
-    #driver.execute_script("document.getElementById('shapeType').value=arguments[0];", data["type"])
-    #driver.execute_script("document.getElementById('shapeType').dispatchEvent(new Event('change'));")
+    def set_val(eid, val, evt = "input"):
+        driver.execute_script(
+            "var el=document.getElementById(arguments[0]);"
+            "if(el){el.value=arguments[1]; el.dispatchEvent(new Event(arguments[2]));}",
+            eid, str(val), evt
+        )
 
-    if data["type"] == "cube":
-        shape = driver.find_element(By.ID, "shapeType")
-        driver.find_element(By.ID, "boxWidth").send_keys(str(data["width"]))
-        driver.find_element(By.ID, "boxHeight").send_keys(str(data["height"]))
-        driver.find_element(By.ID, "boxDepth").send_keys(str(data["depth"]))
+    driver.execute_script(
+        "var el=document.getElementById('shapeType');"
+        "if(el){el.value=arguments[0]; el.dispatchEvent(new Event('change'));}",
+        data["type"]
+    )
+    set_val("color", data["color"], "input")
+    
+    if data["type"] == "cube" or data["type"] in ("tI", "tT", "tZ", "tL"):
+        set_val("boxWidth", data["width"])
+        if data["type"] == "cube":
+            set_val("boxHeight", data["height"])
+            set_val("boxDepth", data["depth"])
     elif data["type"] == "circle":
-        driver.find_element(By.ID, "sphereWidth").send_keys(str(data["radius"]))
+        # 前端的球體欄位名為 sphereWidth（直徑）
+        set_val("sphereWidth", data["width"])
     elif data["type"] == "lshape":
-        driver.find_element(By.ID, "customWidth").send_keys(str(data["width"]))
-        driver.find_element(By.ID, "customHeight").send_keys(str(data["height"]))
-        driver.find_element(By.ID, "customDepth").send_keys(str(data["depth"]))
+        set_val("customWidth", data["width"])
+        set_val("customHeight", data["height"])
+        set_val("customDepth", data["depth"])
 
-    driver.find_element(By.ID, "color").clear()
-    driver.find_element(By.ID, "color").send_keys(data["color"])
+    # 孔洞（只有 cube / circle / lshape 可用）
+    if data.get("hasHole") and data["type"] in ("cube", "circle", "lshape"):
+        driver.execute_script("var c=document.getElementById('hasHole'); if(c && !c.checked){c.click();}")
+        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.ID, "holeWidth")))
+        set_val("holeWidth", data["holeWidth"])
+        set_val("holeHeight", data["holeHeight"])
+    else:
+        driver.execute_script("var c=document.getElementById('hasHole'); if(c && c.checked){c.click();}")
 
-    if data.get("hasHole"):
-        checkbox = driver.find_element(By.ID, "hasHole")
-        if not checkbox.is_selected():
-            checkbox.click()
-        WebDriverWait(driver, 3).until(EC.visibility_of_element_located((By.ID, "holeWidth")))
-        driver.find_element(By.ID, "holeWidth").send_keys(str(data["holeWidth"]))
-        driver.find_element(By.ID, "holeHeight").send_keys(str(data["holeHeight"]))
-
-    driver.find_element(By.ID, "generate").click()
+    # 產生
+    driver.execute_script("document.getElementById('generate').click();")
     print("✅ 已將辨識結果填入並產生模型")
 
-if __name__ == "__main__":
+def main():
     chrome_options = Options()
-    chrome_options.add_argument("--use-fake-ui-for-media-stream")
+    chrome_options.add_argument("--use-fake-ui-for-media-stream")  # 允許存取相機
     driver = webdriver.Chrome(options=chrome_options)
+    driver.set_window_size(1280, 900)
     driver.get("http://localhost:5000")
-    #time.sleep(1)
-    while True:
-        wait_for_recognize_button(driver)
-        data = extract_params()
-        if data:
-            fill_form_with_selenium(driver, data)
-            print("✅ 模型產生完成")
-        else:
-            print("❌ 辨識結果無效，請重試")
-input("✅ 操作完成，請檢查網頁模型結果。關閉 Chrome 視窗後按 Enter 結束。")
+
+    try:
+        while True:
+            wait_for_recognize_button(driver)
+            data = extract_params()
+            if data:
+                fill_form_with_selenium(driver, data)
+                print("✅ 模型產生完成")
+            else:
+                print("❌ 辨識結果無效，請重試")
+    except KeyboardInterrupt:
+        print("\n👋 已中止。")
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()

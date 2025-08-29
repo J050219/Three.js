@@ -7,39 +7,84 @@
 
     <script async src="https://unpkg.com/es-module-shims@1/dist/es-module-shims.js"></script>
     <script type="importmap">
-    {
-      "imports": {
-        "three": "/static/node_modules/three/build/three.module.js",
-        "three/examples/jsm/controls/OrbitControls.js": "/static/node_modules/three/examples/jsm/controls/OrbitControls.js",
-        "three-csg-ts": "/static/node_modules/three-csg-ts/lib/esm/index.js",
-        "@tweenjs/tween.js": "/static/node_modules/@tweenjs/tween.js/dist/tween.esm.js"
+      {
+        "imports": {
+          "three": "/static/node_modules/three/build/three.module.js",
+          "three/examples/jsm/controls/OrbitControls.js": "/static/node_modules/three/examples/jsm/controls/OrbitControls.js",
+          "three-csg-ts": "/static/node_modules/three-csg-ts/lib/esm/index.js",
+          "@tweenjs/tween.js": "/static/node_modules/@tweenjs/tween.js/dist/tween.esm.js"
+        }
       }
-    }
     </script>
 
     <style>
       * { box-sizing: border-box; }
       body { margin: 0; overflow: hidden; background: black; font-family: system-ui, sans-serif; }
+
+      #optBar{
+        position: fixed;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10000;
+        display: flex;
+        gap: 10px;
+        padding: 6px 10px;
+        background: rgba(30,30,30,0.35);
+        border-radius: 10px;
+        backdrop-filter: blur(6px);
+      }
+      #optBar .btn{
+        font-size: 14px;
+        padding: 6px 12px;
+        border-radius: 8px;
+        border: 1px solid #6ea8fe;
+        background: #2f74ff;
+        color: #fff;
+        cursor: pointer;
+      }
+      #optBar .btn.ghost{
+        background: transparent;
+        color: #e6e6e6;
+        border-color: #9aa4b2;
+      }
+      #optBar .btn:hover{ filter: brightness(1.08); }
+
       #ui {
         position: absolute;
-        top: 10px;
+        top: 60px;
         left: 10px;
         background: rgba(255, 255, 255, 0.9);
         padding: 12px;
-        border-radius: 8px;
+        border-radius: 10px;
         font-family: sans-serif;
-        z-index: 10;
+        z-index: 20;
+        min-width: 260px;
       }
-      .param-group {
-        margin-bottom: 10px;
+      .param-group {margin-bottom: 8px;}
+      .param-group input {margin: 2px 0 ; display: block;  width: 100px;}
+      #library {
+        position: absolute;
+        top: 240px; left: 10px;
+        width: 320px; height: 280px;
+        background: rgba(255,255,255,.95);
+        border-radius: 10px;
+        padding: 10px;
+        z-index: 15;
+        display: flex;
+        overflow: hidden;
+        flex-direction: column;
+        color: #111;
+
       }
-      .param-group input {
-        margin: 2px 0 ;
-        display: block;
-        width: 100px;
-      }
-      label { display: block; margin: 5px 0; }
-      input[type="number"] { width: 80px; }
+      #library h3 { margin: 0 0 8px; font-size: 16px; }
+      #libraryList {flex: 1 1 auto; overflow: auto; display: block;}
+      #libraryList .item {border: 1px solid #ddd; border-radius: 8px; padding: 8px; margin-bottom: 8px; background: #fff;}
+      #libraryList .row { font-size: 12px; color:#555; margin-top: 4px; display:flex; align-items:center; gap:6px; }
+      #libraryList .chip { width:14px; height:14px; border-radius:3px; border:1px solid #ccc; display:inline-block; }
+      #libraryList .btn {margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 6px; border: 0; background:#0ea5e9; color:#fff; cursor:pointer;}
+      /* label { display: block; margin: 5px 0; }
+      input[type="number"] { width: 80px; } */
       #video {
         position: absolute;
         bottom: 10px;
@@ -50,37 +95,14 @@
         background-color: black;
         z-index: 5;
       }
-      #library {
-        position: absolute;
-        top: 240px; left: 10px;
-        width: 320px; height: 260px;
-        background: rgba(255,255,255,.95);
-        border-radius: 10px;
-        padding: 10px;
-        z-index: 12;
-        display: flex;
-        flex-direction: column;
-        color: #111;
-      }
-      #library h3 { margin: 0 0 8px; font-size: 16px; }
-      #libraryList {
-        flex: 1 1 auto;
-        overflow: auto;
-        display: block;
-      }
-      #libraryList .item {
-        border: 1px solid #ddd; border-radius: 8px; padding: 8px; margin-bottom: 8px;
-        background: #fff;
-      }
-      #libraryList .row { font-size: 12px; color:#555; margin-top: 4px; display:flex; align-items:center; gap:6px; }
-      #libraryList .chip { width:14px; height:14px; border-radius:3px; border:1px solid #ccc; display:inline-block; }
-      #libraryList .btn {
-        margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 6px; border: 0;
-        background:#0ea5e9; color:#fff; cursor:pointer;
-      }
+      button {cursor: pointer;}
     </style>
   </head>
   <body>
+    <div id="optBar">
+      <button id="optimizeBtn" class="btn">最佳化擺放</button>
+      <button id="stopOptimizeBtn" class="btn ghost">停止最佳化</button>
+    </div>
     <div id="ui">
         <label>
             選擇圖形：
@@ -93,67 +115,68 @@
                 <option value="tZ">Z 形方塊</option>
                 <option value="tL">L 形方塊</option>
             </select>
-        </label>
-        <div id="boxParams" class="param-group">
+          </label>
+          <div id="boxParams" class="param-group">
             <input id="boxWidth" type="number" placeholder="寬 (Width)" />
             <input id="boxHeight" type="number" placeholder="高 (Height)" />
             <input id="boxDepth" type="number" placeholder="深 (Depth)" />
-        </div>
+          </div>
 
-        <div id="sphereParams" class="param-group" style="display:none;">
-            <input id="sphereWidth" type="number" placeholder="半徑 (Radius)" />
-        </div>
+          <div id="sphereParams" class="param-group" style="display:none;">
+            <input id="sphereWidth" type="number" placeholder="直徑 (Diameter)" />
+          </div>
 
-        <div id="customParams" class="param-group" style="display:none;">
+          <div id="customParams" class="param-group" style="display:none;">
             <input id="customWidth" type="number" placeholder="寬 (Width)" />
             <input id="customHeight" type="number" placeholder="高 (Height)" />
             <input id="customDepth" type="number" placeholder="厚度 (Depth)" />
-        </div>
+          </div>
 
-        <label>
+          <label>
             顏色：
             <input id="color" type="color" value="#00ff00" />
-        </label>
+          </label>
 
-        <label>
+          <label>
             <input type="checkbox" id="hasHole" /> 是否簍空
-        </label>
+          </label>
 
-        <div id="holeInput" style="display:none;">
+          <div id="holeInput" style="display:none;">
             <input id="holeWidth" type="number" placeholder="孔寬 (Hole Width)" />
             <input id="holeHeight" type="number" placeholder="孔高 (Hole Height)" />
+          </div>
+          <div style="margin-top: 8px"></div>
+            <button id="generate">產生物體</button>
+            <button id="recognizeBtn" onclick="this.setAttribute('data-clicked', 'true')">辨識參數</button>
+          </div>
         </div>
-        <button id="generate">產生物體</button>
-        <button id="recognizeBtn" onclick="this.setAttribute('data-clicked', 'true')">辨識參數</button>
-        <button id="optimizeBtn" class="btn">最佳化擺放</button>
-        <button id="stopOptimizeBtn" class="btn">停止最佳化</button>
-    </div>
-    <aside id="library">
-      <h3>物體清單</h3>
-      <div id="libraryList" style="font-size:14px; color:#333;"></div>
-    </aside>
+        <aside id="library">
+          <h3>物體清單</h3>
+          <div id="libraryList"></div>
+        </aside>
 
-    <img id="video" src="/get-camera-frame" alt="攝影機畫面" />
+        <img id="video" src="/get-camera-frame" alt="攝影機畫面" />
 
-    <script type="module" src="/static/main.js"></script>
-    <script>
-      function placeLibrary() {
-        const ui = document.getElementById('ui');
-        const lib = document.getElementById('library');
-        if (!ui || !lib) return;
-        const r = ui.getBoundingClientRect();
+        <script type="module" src="/static/main.js"></script>
+        <script>
+        function placeLibrary() {
+          const ui = document.getElementById('ui');
+          const lib = document.getElementById('library');
+          if (!ui || !lib) return;
+          const r = ui.getBoundingClientRect();
 
-        lib.style.left = r.left + 'px';
-        lib.style.top  = (r.bottom + 10) + 'px';
-        lib.style.width = r.width + 'px';
-
-        // 依剩餘空間調整高度（最少 160px，最多 340px）
-        const maxH = window.innerHeight - (r.bottom + 20);
-        //const h = Math.max(220, Math.min(460, maxH));
-        lib.style.height = Math.max(220, Math.min(460, maxH)) + 'px';
-      }
-      window.addEventListener('load', placeLibrary);
-      window.addEventListener('resize', placeLibrary);
+          lib.style.left = r.left + 'px';
+          lib.style.top  = (r.bottom + 10) + 'px';
+          lib.style.width = r.width + 'px';
+          lib.style.height = Math.max(220, Math.min(460, window.innerHeight - (r.bottom + 20))) + 'px';
+          /* 
+          // 依剩餘空間調整高度（最少 160px，最多 340px）
+          const maxH = window.innerHeight - (r.bottom + 20);
+          //const h = Math.max(220, Math.min(460, maxH));
+           */
+        }
+        addEventListener('load', placeLibrary);
+        addEventListener('resize', placeLibrary);
     </script>
   </body>
 </html>

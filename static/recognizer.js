@@ -55,14 +55,6 @@ function pickNumber(text, regex, fallback = 20) {
 }
 
 export async function createRecognizer(videoElement) {
-    /* try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        videoElement.srcObject = stream;
-        await videoElement.play().catch(() => {});
-        console.log("✅ 視訊播放成功");
-    } catch (err) {
-        console.error("❌ 無法播放視訊", err);
-    } */
     let busy = false; 
 
     return async function recognize(callback) {
@@ -100,7 +92,9 @@ export async function createRecognizer(videoElement) {
                 /(?:lshape|不規則)/i.test(text) ? 'lshape' : 'cube';
             const colorRaw = (text.match(/(紅|綠|藍|黃|紫|白|黑)(色)?/) || [])[0] || '綠色';
             const color = normalizeColor(colorRaw);
-            const hasHole = /(有洞|鏤空|簍空)/.test(text);
+            const hasHole = /(有洞|有孔|孔洞|鏤空|簍空)/i.test(text);
+            const holeWidth = extract(/(?:洞寬|孔寬)\D*(\d+(?:\.\d+)?)/i, 10);
+            const holeHeight = extract(/(?:洞高|孔高)\D*(\d+(?:\.\d+)?)/i, 10);
             const result = {
                 type,
                 width:  extract(/寬(?:度)?\D*(\d+(?:\.\d+)?)/i, 20),
@@ -109,8 +103,8 @@ export async function createRecognizer(videoElement) {
                 radius: extract(/半徑\D*(\d+(?:\.\d+)?)/i, 20),
                 color,
                 hasHole,
-                holeWidth:  extract(/洞寬\D*(\d+(?:\.\d+)?)/i, 10),
-                holeHeight: extract(/洞高\D*(\d+(?:\.\d+)?)/i, 10)
+                holeWidth:  extract(/(?:洞寬|孔寬)\D*(\d+(?:\.\d+)?)/i, 10),
+                holeHeight: extract(/(?:洞高|孔高)\D*(\d+(?:\.\d+)?)/i, 10)
             };
             // 四格方塊：僅需要「單位邊長 = width」
             if (['tI','tT','tZ','tL'].includes(type)){
