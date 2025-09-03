@@ -529,35 +529,76 @@ function boundsForObjectXZ(obj) {
     };
 }
 
-function tryPerturbOne(obj, step) {
-    const before = { pos: obj.position.clone(), rotY: obj.rotation.y };
-    const jitter = (v) => v + (Math.random() < 0.5 ? -1 : 1) * step; 
+function tryPerturbOne(obj, linStep, angStep) {
+    const before = { pos: obj.position.clone(), rot: obj.rotation.clone() };
+    const mode = Math.random();
+    
+    //const jitter = (v) => v + (Math.random() < 0.5 ? -1 : 1) * linStep;
+    // ===== A. 平移擾動 =====
+  if (mode < 0.45) {
+    const jitter = (v) => v + (Math.random() < 0.5 ? -1 : 1) * linStep;
 
-    if (Math.random() < 0.25) {
-        obj.rotation.y += (Math.random() < 0.5 ? 1 : -1) * Math.PI/2;
+    const bounds0 = boundsForObjectXZ(obj);
+    let nx = THREE.MathUtils.clamp(jitter(obj.position.x), bounds0.minX, bounds0.maxX);
+    let nz = THREE.MathUtils.clamp(jitter(obj.position.z), bounds0.minZ, bounds0.maxZ);
+
+    // 真的沒動就再給一次隨機
+    if (Math.abs(nx - obj.position.x) < 1e-6 && Math.abs(nz - obj.position.z) < 1e-6) {
+      nx = THREE.MathUtils.clamp(obj.position.x + (Math.random()<0.5?-1:1)*linStep, bounds0.minX, bounds0.maxX);
+      nz = THREE.MathUtils.clamp(obj.position.z + (Math.random()<0.5?-1:1)*linStep, bounds0.minZ, bounds0.maxZ);
+    }
+    obj.position.x = nx;
+    obj.position.z = nz;
+
+  // ===== B. 旋轉擾動 =====
+  } else {
+    // 50% 用 90° 快速轉向；50% 用小角度微調（更精細）
+    const snap = Math.random() < 0.5;
+
+    if (snap) {
+      const axis = Math.floor(Math.random() * 3);            // 0:x, 1:y, 2:z
+      const delta = (Math.random() < 0.5 ? 1 : -1) * Math.PI/2;
+      if (axis === 0) obj.rotation.x += delta;
+      if (axis === 1) obj.rotation.y += delta;
+      if (axis === 2) obj.rotation.z += delta;
     } else {
-        const bounds0 = boundsForObjectXZ(obj);
-        let nx = THREE.MathUtils.clamp(jitter(obj.position.x), bounds0.minX, bounds0.maxX);
-        let nz = THREE.MathUtils.clamp(jitter(obj.position.z), bounds0.minZ, bounds0.maxZ);
-        if (Math.abs(nx - obj.position.x) < 1e-6 && Math.abs(nz - obj.position.z) < 1e-6) {
-        nx = THREE.MathUtils.clamp(obj.position.x + (Math.random()<0.5?-1:1)*step, bounds0.minX, bounds0.maxX);
-        nz = THREE.MathUtils.clamp(obj.position.z + (Math.random()<0.5?-1:1)*step, bounds0.minZ, bounds0.maxZ);
-        }
-        obj.position.x = nx; obj.position.z = nz;
+      // 小角度三軸同時微調（±angStep）
+      const r = () => (Math.random() * 2 - 1) * angStep;
+      obj.rotation.x += r();
+      obj.rotation.y += r();
+      obj.rotation.z += r();
     }
-    obj.position.y = findRestingY(obj);
-    /* clampInsideArea(obj); */
-    const bounds1 = boundsForObjectXZ(obj);
-    const inside =
-        obj.position.x >= bounds1.minX - 1e-3 && obj.position.x <= bounds1.maxX + 1e-3 &&
-        obj.position.z >= bounds1.minZ - 1e-3 && obj.position.z <= bounds1.maxZ + 1e-3;
-    if (!inside || isOverlapping(obj, obj)) {
-        obj.position.copy(before.pos);
-        obj.rotation.y = before.rotY;
-        return { applied:false };
+
+    // 旋轉後幾何外接盒改變，x/z 位置可能需要夾回容器
+    const b = boundsForObjectXZ(obj);
+    obj.position.x = THREE.MathUtils.clamp(obj.position.x, b.minX, b.maxX);
+    obj.position.z = THREE.MathUtils.clamp(obj.position.z, b.minZ, b.maxZ);
+  }
+
+  // 每次變動後都讓物體落在當前可安置的最低點
+  obj.position.y = findRestingY(obj);
+
+  // 邊界/碰撞檢查，不合法就復原
+  const bounds1 = boundsForObjectXZ(obj);
+  const inside =
+    obj.position.x >= bounds1.minX - 1e-3 && obj.position.x <= bounds1.maxX + 1e-3 &&
+    obj.position.z >= bounds1.minZ - 1e-3 && obj.position.z <= bounds1.maxZ + 1e-3;
+
+  if (!inside || isOverlapping(obj, obj)) {
+    obj.position.copy(before.pos);
+    obj.rotation.copy(before.rot);
+    return { applied: false };
+  }
+
+  // 可被退回的 undo
+  return {
+    applied: true,
+    undo: () => {
+      obj.position.copy(before.pos);
+      obj.rotation.copy(before.rot);
     }
-    return { applied:true, undo: ()=>{ obj.position.copy(before.pos); obj.rotation.y = before.rotY; } };
-}
+  };
+}    
 
 let annealRunning = false;
 
@@ -569,6 +610,8 @@ async function runAnnealing(opts = {}) {
     const initTemp = opts.initTemp ?? 2.2;
     const cooling  = opts.cooling  ?? 0.996;
     const baseStep = opts.baseStep ?? 5; 
+    const baseAngle = opts.baseAngle ?? (Math.PI / 12);   // 角度步長（預設 15°）
+
     annealRunning = true;
     uiToast('開始最佳化擺放');
     let bestSnap   = snapshotState();
@@ -580,7 +623,8 @@ async function runAnnealing(opts = {}) {
 
         const e0 = packingEnergy();
         let trial = { applied:false };
-        for (let k = 0; k < 30 && !trial.applied; k++) trial = tryPerturbOne(obj, step);
+
+        for (let k = 0; k < 30 && !trial.applied; k++) trial = tryPerturbOne(obj, step, baseAngle);
         if (!trial.applied) { T *= cooling; if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r)); continue; }
 
         const e1 = packingEnergy();
@@ -605,7 +649,7 @@ async function runAnnealing(opts = {}) {
 }
 
 document.getElementById('optimizeBtn')?.addEventListener('click', () => {
-    runAnnealing({ steps: 8000, initTemp: 2.2, cooling: 0.996, baseStep: 5 });
+    runAnnealing({ steps: 8000, initTemp: 2.2, cooling: 0.996, baseStep: 5, baseAngle: Math.PI/12 });
 });
 
 document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => {
