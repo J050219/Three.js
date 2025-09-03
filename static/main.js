@@ -1,13 +1,13 @@
 import * as THREE from 'three'; 
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-//import { CSG } from 'three-csg-ts';
 import * as ThreeCSG from 'three-csg-ts';
 import { createRecognizer } from './recognizer.js';
-import TWEEN from '@tweenjs/tween.js';
+import * as TWEEN from '@tweenjs/tween.js';
 
 const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
 const LIB_KEY = 'recognizedLibrary';
 const UNDER_AUTOMATION = (typeof navigator !== 'undefined') && navigator.webdriver === true;
+const EPS = 0.5;
 
 const TETROMINO_TYPES = new Set(['tI','tT','tZ','tL']);
 function typeLabel(t) {
@@ -32,6 +32,7 @@ function getLibrarySafe() {
         return [];
     }
 }
+
 const library = getLibrarySafe();
 
 function saveLibrary() {
@@ -64,28 +65,82 @@ function renderLibrary() {
         </div>`;
         return;
     }
-
     list.innerHTML = library.map((p, i) => {
     const { title, hole, color } = summarize(p);
     return `<div class="item" data-index="${i}">
-      <div><strong>${title}</strong></div>
-      <div class="row"><span class="chip" style="background:${color}"></span><span>${hole}</span></div>
-      <button class="btn use-item" data-index="${i}">放到場景</button>
-    </div>`;
-  }).join('');
+        <div><strong>${title}</strong></div>
+        <div class="row"><span class="chip" style="background:${color}"></span><span>${hole}</span></div>
+        <button class="btn use-item" data-index="${i}">放到場景</button>
+        </div>`;
+    }).join('');
+}
+
+function toCSGReady(mesh) {
+    mesh.updateMatrixWorld(true);
+    const g = mesh.geometry;
+    const gi = g.index ? g.toNonIndexed() : g.clone();
+    gi.computeVertexNormals();
+    const m = new THREE.Mesh(gi, mesh.material);
+    m.position.copy(mesh.position);
+    m.quaternion.copy(mesh.quaternion);
+    m.scale.copy(mesh.scale);
+    m.updateMatrix();
+    return m;
+}
+
+function defaultHoleTypeByShape(type, hasHole) {
+    if (!hasHole) return 'none';
+    if (type === 'circle') return 'cyl'; 
+    return 'box';
+}
+
+function makeHoleMesh(opts = {}) {
+    const holeType = (opts.holeType || 'box').toLowerCase();
+    const axis = (opts.holeAxis || 'y').toLowerCase();
+    const width = Math.max(1, (opts.holeWidth || 10));
+    const height = Math.max(1, (opts.holeHeight || 10));
+    const depth = Math.max(1, (opts.holeDepth || 10));
+
+    if (holeType === 'sphere') {
+        const r = Math.max(1, width * 0.5) - EPS;
+        const g = new THREE.SphereGeometry(r, 32, 32);
+        return toCSGReady(new THREE.Mesh(g, new THREE.MeshBasicMaterial()));
+    }
+    if (holeType === 'cyl') {
+        const r = Math.max(1, width * 0.5);
+        const h = depth + 2 * EPS;
+        const g = new THREE.CylinderGeometry(r, r, h, 32);
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
+        if (axis === 'x') m.rotation.z = Math.PI / 2;
+        if (axis === 'z') m.rotation.x = Math.PI / 2;
+        return toCSGReady(m);
+    }
+    let w = width  + 2 * EPS,
+        h = height + 2 * EPS,
+        d = depth  + 2 * EPS;
+    if (axis === 'x') { w = depth + 2 * EPS; }
+    else if (axis === 'y') { h = depth + 2 * EPS; }
+    else { d = depth + 2 * EPS; }
+    const g = new THREE.BoxGeometry(w, h, d);
+    return toCSGReady(new THREE.Mesh(g, new THREE.MeshBasicMaterial()));
 }
 
 function addToLibrary(params) {
     const n = (v,d)=> (Number.isFinite(+v)? +v : d);
+    const t = params.type || 'cube';
+    const isTet = TETROMINO_TYPES.has(t);
+    const hasHoleClean = isTet ? false : !!params.hasHole;
     const clean = {
-        type: params.type || 'cube',
+        type: t,
         width:  n(params.width, 20),
-        height: n(params.height, TETROMINO_TYPES.has(params.type) ? params.width : (params.type === 'circle' ? params.width : 20)),
-        depth:  n(params.depth,  TETROMINO_TYPES.has(params.type) ? params.width : (params.type === 'circle' ? params.width : 20)),
+        height: n(params.height, isTet ? params.width : (t === 'circle' ? params.width : 20)),
+        depth:  n(params.depth,  isTet ? params.width : (t === 'circle' ? params.width : 20)),
         color:  params.color || '#00ff00',
-        hasHole: TETROMINO_TYPES.has(params.type) ? false : !!params.hasHole,
+        hasHole: hasHoleClean,
         holeWidth:  n(params.holeWidth, 10),
         holeHeight: n(params.holeHeight, 10),
+        holeType: params.holeType || defaultHoleTypeByShape(t, hasHoleClean),
+        holeAxis: (params.holeAxis || 'y').toLowerCase()
     };
     console.log('[Library] add', clean);
     library.unshift(clean);
@@ -100,7 +155,7 @@ document.addEventListener('click', (e) => {
     const idx = +btn.dataset.index;
     const item = library[idx];
     if (!item) return;
-    createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight);
+    createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight, item.holeType, item.holeAxis);
 });
 
 function normalizeColor(input) {
@@ -166,16 +221,16 @@ const containerEdges = new THREE.LineSegments(
 container.add(containerEdges);
 scene.add(container);
 
-const stagingSize = 100;
+const stagingSize = 110;
 const stagingPad = new THREE.Mesh(new THREE.BoxGeometry(stagingSize, 8, stagingSize), new THREE.MeshBasicMaterial({ color: 0x777777 }));
 const containerWidth = containerGeometry.parameters.width;
-stagingPad.position.set(container.position.x + containerWidth / 2 + stagingSize / 2 + 20, -6, container.position.z);
+stagingPad.position.set(container.position.x + containerWidth / 2 + stagingSize / 2 + 20, -5, container.position.z);
 scene.add(stagingPad);
 
-const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 80, stagingSize);
+const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 130, stagingSize);
 const stageFrameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent : true, opacity : 0.15, side : THREE.DoubleSide });
 const stagingFrame = new THREE.Mesh(stageFrameGeo, stageFrameMat);
-stagingFrame.position.set(stagingPad.position.x, stagingPad.position.y + 40, stagingPad.position.z);
+stagingFrame.position.set(stagingPad.position.x, stagingPad.position.y + 60, stagingPad.position.z);
 stagingFrame.add(new THREE.LineSegments(
   new THREE.EdgesGeometry(stageFrameGeo),
   new THREE.LineBasicMaterial({ color: 0x00ffff })
@@ -214,7 +269,6 @@ function clearAllObjects() {
 function ensureSceneButtons() {
     const ui = document.getElementById('ui');
     if (!ui) return;
-
     if (!document.getElementById('deleteSelectedBtn')) {
         const b1 = document.createElement('button');
         b1.id = 'deleteSelectedBtn';
@@ -236,30 +290,29 @@ function ensureSceneButtons() {
 addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected(); });
 
 function buildTetrominoMesh(kind, unit, material) {
-  const group = new THREE.Group();
-  const g = new THREE.BoxGeometry(unit, unit, unit);
-  let layout = [];
-  switch (kind) {
-    case 'tI': layout = [[-1.5,0],[ -0.5,0],[ 0.5,0],[ 1.5,0]]; break;
-    case 'tT': layout = [[-1,0],[0,0],[1,0],[0,1]]; break;
-    case 'tZ': layout = [[-1,0],[0,0],[0,1],[1,1]]; break;
-    case 'tL': layout = [[-1,0],[0,0],[1,0],[-1,1]]; break;
-    default:   layout = [[-1,0],[0,0],[1,0],[0,1]];
-  }
-  for (const [gx,gz] of layout) {
-    const cube = new THREE.Mesh(g, material);
-    cube.position.set(gx * unit, 0, gz * unit);
-    group.add(cube);
-  }
-  const box = new THREE.Box3().setFromObject(group);
-  const center = new THREE.Vector3();
-  box.getCenter(center);
-  group.children.forEach(c => {
-    c.position.sub(center);
-  });
-  /* group.position.sub(center); */
-  group.userData.unit = unit;
-  return group;
+    const group = new THREE.Group();
+    const g = new THREE.BoxGeometry(unit, unit, unit);
+    let layout = [];
+    switch (kind) {
+        case 'tI': layout = [[-1.5,0],[ -0.5,0],[ 0.5,0],[ 1.5,0]]; break;
+        case 'tT': layout = [[-1,0],[0,0],[1,0],[0,1]]; break;
+        case 'tZ': layout = [[-1,0],[0,0],[0,1],[1,1]]; break;
+        case 'tL': layout = [[-1,0],[0,0],[1,0],[-1,1]]; break;
+        default:   layout = [[-1,0],[0,0],[1,0],[0,1]];
+    }
+    for (const [gx,gz] of layout) {
+        const cube = new THREE.Mesh(g, material);
+        cube.position.set(gx * unit, 0, gz * unit);
+        group.add(cube);
+    }
+    const box = new THREE.Box3().setFromObject(group);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    group.children.forEach(c => {
+        c.position.sub(center);
+    });
+    group.userData.unit = unit;
+    return group;
 }
 
 function updateParamVisibility(type = document.getElementById('shapeType')?.value) {
@@ -267,6 +320,7 @@ function updateParamVisibility(type = document.getElementById('shapeType')?.valu
     const sphere = document.getElementById('sphereParams');
     const custom = document.getElementById('customParams');
     const hole   = document.getElementById('holeInput');
+    const chk = document.getElementById('hasHole');
     if (!box || !sphere || !custom || !hole) return;
 
     const isTet = TETROMINO_TYPES.has(type);
@@ -274,7 +328,7 @@ function updateParamVisibility(type = document.getElementById('shapeType')?.valu
     box.style.display    = (type === 'cube' || isTet) ? 'block' : 'none';
     sphere.style.display = (type === 'circle') ? 'block' : 'none';
     custom.style.display = (type === 'lshape') ? 'block' : 'none';
-
+    
     const w = document.getElementById('boxWidth');
     const h = document.getElementById('boxHeight');
     const d = document.getElementById('boxDepth');
@@ -287,8 +341,8 @@ function updateParamVisibility(type = document.getElementById('shapeType')?.valu
         if (h) h.style.display = 'block';
         if (d) d.style.display = 'block';
     }
-
-    const chk = document.getElementById('hasHole');
+    const canHole = !isTet;
+    if (chk) chk.disabled = !canHole;
     hole.style.display = (!isTet && chk?.checked) ? 'block' : 'none';
 }
 
@@ -296,7 +350,7 @@ function clearFormFields() {
     [
         'boxWidth','boxHeight','boxDepth',
         'sphereWidth',
-        'customWidth','customHeight','customDepth',
+        'customWidth',
         'holeWidth','holeHeight'
     ].forEach(id => {
         const el = document.getElementById(id);
@@ -354,264 +408,145 @@ function findRestingY(object) {
 }
 
 function getAreaByXZ(x, z) {
-  const cbox = new THREE.Box3().setFromObject(container);
-  if (x >= cbox.min.x && x <= cbox.max.x && z >= cbox.min.z && z <= cbox.max.z) return 'container';
+    const cbox = new THREE.Box3().setFromObject(container);
+    if (x >= cbox.min.x && x <= cbox.max.x && z >= cbox.min.z && z <= cbox.max.z) return 'container';
 
-  const halfW = stagingPad.geometry.parameters.width / 2;
-  const halfD = stagingPad.geometry.parameters.depth / 2;
-  const sxmin = stagingPad.position.x - halfW, sxmax = stagingPad.position.x + halfW;
-  const szmin = stagingPad.position.z - halfD, szmax = stagingPad.position.z + halfD;
-  if (x >= sxmin && x <= sxmax && z >= szmin && z <= szmax) return 'staging';
+    const halfW = stagingPad.geometry.parameters.width / 2;
+    const halfD = stagingPad.geometry.parameters.depth / 2;
+    const sxmin = stagingPad.position.x - halfW, sxmax = stagingPad.position.x + halfW;
+    const szmin = stagingPad.position.z - halfD, szmax = stagingPad.position.z + halfD;
+    if (x >= sxmin && x <= sxmax && z >= szmin && z <= szmax) return 'staging';
 
-  return null;
+    return null;
 }
 
 function getBoundsForArea(area, half) {
-  if (area === 'container') {
-    const cb = new THREE.Box3().setFromObject(container);
-    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-    return {
-      minX: cb.min.x + half.x, maxX: cb.max.x - half.x,
-      minZ: cb.min.z + half.z, maxZ: cb.max.z - half.z,
-      minY: palletTop + half.y, maxY: cb.max.y - half.y,
-      baseY: palletTop
-    };
-  } else if (area === 'staging') {
-    const halfW = stagingPad.geometry.parameters.width / 2;
-    const halfD = stagingPad.geometry.parameters.depth / 2;
-    const baseY = stagingPad.position.y + stagingPad.geometry.parameters.height / 2;
-    return {
-      minX: stagingPad.position.x - halfW + half.x,
-      maxX: stagingPad.position.x + halfW - half.x,
-      minZ: stagingPad.position.z - halfD + half.z,
-      maxZ: stagingPad.position.z + halfD - half.z,
-      minY: baseY + half.y,
-      maxY: baseY + 200 - half.y, 
-      baseY
-    };
-  }
-  const baseY = pallet.position.y + pallet.geometry.parameters.height / 2;
-  return { minX: -Infinity, maxX: Infinity, minZ: -Infinity, maxZ: Infinity, minY: baseY + half.y, maxY: baseY + 200 - half.y, baseY };
+    if (area === 'container') {
+        const cb = new THREE.Box3().setFromObject(container);
+        const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+        return {
+        minX: cb.min.x + half.x, maxX: cb.max.x - half.x,
+        minZ: cb.min.z + half.z, maxZ: cb.max.z - half.z,
+        minY: palletTop + half.y, maxY: cb.max.y - half.y,
+        baseY: palletTop
+        };
+    } else if (area === 'staging') {
+        const halfW = stagingPad.geometry.parameters.width / 2;
+        const halfD = stagingPad.geometry.parameters.depth / 2;
+        const baseY = stagingPad.position.y + stagingPad.geometry.parameters.height / 2;
+        return {
+        minX: stagingPad.position.x - halfW + half.x,
+        maxX: stagingPad.position.x + halfW - half.x,
+        minZ: stagingPad.position.z - halfD + half.z,
+        maxZ: stagingPad.position.z + halfD - half.z,
+        minY: baseY + half.y,
+        maxY: baseY + 200 - half.y, 
+        baseY
+        };
+    }
+    const baseY = pallet.position.y + pallet.geometry.parameters.height / 2;
+    return { minX: -Infinity, maxX: Infinity, minZ: -Infinity, maxZ: Infinity, minY: baseY + half.y, maxY: baseY + 200 - half.y, baseY };
 }
 
 function findRestingYForArea(object, area, half) {
-  const { baseY, maxY } = getBoundsForArea(area, half);
-  const clone = object.clone();
-  let y = baseY + half.y;
-  while (y <= maxY) {
-    clone.position.set(object.position.x, y, object.position.z);
-    if (!isOverlapping(clone, object)) return y;
-    y += 0.5;
-  }
-  return object.position.y;
+    const { baseY, maxY } = getBoundsForArea(area, half);
+    const clone = object.clone();
+    let y = baseY + half.y;
+    while (y <= maxY) {
+        clone.position.set(object.position.x, y, object.position.z);
+        if (!isOverlapping(clone, object)) return y;
+        y += 0.5;
+    }
+    return object.position.y;
 }
 
 /* =====================  模擬退火擺放最佳化  ===================== */
 
 function uiToast(msg, ms = 1400) {
-  let el = document.getElementById('toast');
-  if (!el) {
-    el = document.createElement('div'); el.id = 'toast';
-    Object.assign(el.style, {
-      position:'fixed', left:'12px', bottom:'12px', padding:'8px 12px',
-      background:'rgba(0,0,0,.75)', color:'#fff', borderRadius:'8px',
-      zIndex:9999, fontFamily:'system-ui, sans-serif'
-    });
-    document.body.appendChild(el);
-  }
-  el.textContent = msg;
-  el.style.display = 'block';
-  clearTimeout(el._h); el._h = setTimeout(()=> el.style.display='none', ms);
-}
-
-function getContainerInfo() {
-  const cb = new THREE.Box3().setFromObject(container);
-  const palletTop = pallet.position.y + pallet.geometry.parameters.height/2;
-  return { cb, palletTop };
-}
-
-/* function _unionXZBox() {
-  const box = new THREE.Box3();
-  for (const o of objects) box.expandByObject(o);
-  return {
-    minX: box.min.x, maxX: box.max.x,
-    minZ: box.min.z, maxZ: box.max.z,
-    spanX: Math.max(0, box.max.x - box.min.x),
-    spanZ: Math.max(0, box.max.z - box.min.z),
-    rawBox: box,
-  };
-}
-
-function _estimateCellSize() {
-  let u = Infinity;
-  for (const o of objects) {
-    const b = new THREE.Box3().setFromObject(o);
-    const s = new THREE.Vector3(); b.getSize(s);
-    u = Math.min(u, Math.max(2, Math.min(s.x, s.z)));
-  }
-  if (!isFinite(u)) u = 8;
-  return THREE.MathUtils.clamp(u, 6, 24); 
-}
-
-function _floorVoidRatioCheap(union) { 
-  const spanArea = union.spanX * union.spanZ;
-  if (spanArea <= 0) return 0;
-  let sumArea = 0;
-  for (const o of objects) {
-    const b = new THREE.Box3().setFromObject(o);
-    sumArea += Math.max(0, b.max.x - b.min.x) * Math.max(0, b.max.z - b.min.z);
-  }
-  const cover = Math.min(sumArea, spanArea);
-  return Math.max(0, 1 - cover / spanArea);
-}
-
-function _floorVoidRatio(union, cell) {
-  const cols = Math.max(1, Math.floor(union.spanX / cell));
-  const rows = Math.max(1, Math.floor(union.spanZ / cell));
-  if (cols * rows === 0) return 0;
-
-  const aabbs = objects.map(o => new THREE.Box3().setFromObject(o));
-
-  let filled = 0;
-  const startX = union.minX + cell * 0.5;
-  const startZ = union.minZ + cell * 0.5;
-
-  for (let i = 0; i < cols; i++) {
-    for (let j = 0; j < rows; j++) {
-      const x = startX + i * cell;
-      const z = startZ + j * cell;
-      let occ = false;
-      for (const b of aabbs) {
-        if (x >= b.min.x && x <= b.max.x && z >= b.min.z && z <= b.max.z) {
-          occ = true; break;
-        }
-      }
-      if (occ) filled++;
+    let el = document.getElementById('toast');
+    if (!el) {
+        el = document.createElement('div'); el.id = 'toast';
+        Object.assign(el.style, {
+        position:'fixed', left:'12px', bottom:'12px', padding:'8px 12px',
+        background:'rgba(0,0,0,.75)', color:'#fff', borderRadius:'8px',
+        zIndex:9999, fontFamily:'system-ui, sans-serif'
+        });
+        document.body.appendChild(el);
     }
-  }
-  const areaSpan = union.spanX * union.spanZ;
-  const coverage = filled * cell * cell;
-  const voidArea = Math.max(0, areaSpan - coverage);
-  return areaSpan > 0 ? (voidArea / areaSpan) : 0;
-} */
+    el.textContent = msg;
+    el.style.display = 'block';
+    clearTimeout(el._h); el._h = setTimeout(()=> el.style.display='none', ms);
+}
 
 function packingEnergy() {
-  if (objects.length === 0) return 0;
+    if (objects.length === 0) return 0;
 
-  const cb = new THREE.Box3().setFromObject(container);
-  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+    const cb = new THREE.Box3().setFromObject(container);
+    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
 
-  // 場景中所有物體的包圍盒
-  const unionBox = new THREE.Box3();
-  for (const o of objects) unionBox.expandByObject(o);
+    // 場景中所有物體的包圍盒
+    const unionBox = new THREE.Box3();
+    for (const o of objects) unionBox.expandByObject(o);
 
-  const usedH  = Math.max(0, unionBox.max.y - palletTop);
-  const totalH = cb.max.y - palletTop;
+    const usedH  = Math.max(0, unionBox.max.y - palletTop);
+    const totalH = cb.max.y - palletTop;
 
-  const spanX  = Math.max(0, unionBox.max.x - unionBox.min.x);
-  const spanZ  = Math.max(0, unionBox.max.z - unionBox.min.z);
-  const totalX = cb.max.x - cb.min.x;
-  const totalZ = cb.max.z - cb.min.z;
+    const spanX  = Math.max(0, unionBox.max.x - unionBox.min.x);
+    const spanZ  = Math.max(0, unionBox.max.z - unionBox.min.z);
+    const totalX = cb.max.x - cb.min.x;
+    const totalZ = cb.max.z - cb.min.z;
 
-  const hTerm = totalH > 0 ? (usedH / totalH) : 0;
-  const xTerm = totalX > 0 ? (spanX / totalX) : 0;
-  const zTerm = totalZ > 0 ? (spanZ / totalZ) : 0;
+    const hTerm = totalH > 0 ? (usedH / totalH) : 0;
+    const xTerm = totalX > 0 ? (spanX / totalX) : 0;
+    const zTerm = totalZ > 0 ? (spanZ / totalZ) : 0;
 
-  // 權重可依需求微調
-  return 2.0 * hTerm + 1.0 * xTerm + 1.0 * zTerm;
+    // 權重可依需求微調
+    return 2.0 * hTerm + 1.0 * xTerm + 1.0 * zTerm;
 }
 
 function snapshotState() {
-  return objects.map(o => ({
-    obj: o,
-    pos: o.position.clone(),
-    rot: o.rotation.clone(),
-  }));
+    return objects.map(o => ({
+        obj: o,
+        pos: o.position.clone(),
+        rot: o.rotation.clone(),
+    }));
 }
 function restoreState(snap) {
-  snap.forEach(s => { s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); });
+    snap.forEach(s => { s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); });
 }
 
 function boundsForObjectXZ(obj) {
-  const cb = new THREE.Box3().setFromObject(container);
-  const b  = new THREE.Box3().setFromObject(obj);
-  const sz = new THREE.Vector3(); b.getSize(sz);
-  const halfX = sz.x * 0.5, halfZ = sz.z * 0.5;
+    const cb = new THREE.Box3().setFromObject(container);
+    const b  = new THREE.Box3().setFromObject(obj);
+    const sz = new THREE.Vector3(); b.getSize(sz);
+    const halfX = sz.x * 0.5, halfZ = sz.z * 0.5;
 
-  return {
-    minX: cb.min.x + halfX,
-    maxX: cb.max.x - halfX,
-    minZ: cb.min.z + halfZ,
-    maxZ: cb.max.z - halfZ,
-  };
+    return {
+        minX: cb.min.x + halfX,
+        maxX: cb.max.x - halfX,
+        minZ: cb.min.z + halfZ,
+        maxZ: cb.max.z - halfZ,
+    };
 }
-/* function objectVolume(obj) {
-  const b = new THREE.Box3().setFromObject(obj);
-  const s = new THREE.Vector3();
-  b.getSize(s);
-  return s.x * s.y * s.z;
-}
-
-function clampInsideArea(obj) { // ★ NEW
-  const b = new THREE.Box3().setFromObject(obj);
-  const s = new THREE.Vector3(); b.getSize(s);
-  const half = s.multiplyScalar(0.5);
-
-  const area = getAreaByXZ(obj.position.x, obj.position.z) || 'container';
-  const bd = getBoundsForArea(area, half);
-
-  obj.position.x = THREE.MathUtils.clamp(obj.position.x, bd.minX, bd.maxX);
-  obj.position.z = THREE.MathUtils.clamp(obj.position.z, bd.minZ, bd.maxZ);
-  obj.position.y = THREE.MathUtils.clamp(obj.position.y, bd.minY, bd.maxY);
-  obj.position.y = findRestingYForArea(obj, area, half);
-}
-
-function slideTowardsCorner(obj, step) {
-  for (let iter = 0; iter < 8; iter++) {
-    const bounds = boundsForObjectXZ(obj);
-    let moved = false;
-
-    const candidates = [
-      new THREE.Vector3(obj.position.x - step, obj.position.y, obj.position.z),
-      new THREE.Vector3(obj.position.x,       obj.position.y, obj.position.z - step),
-      new THREE.Vector3(obj.position.x - step, obj.position.y, obj.position.z - step),
-    ];
-
-    for (const p of candidates) {
-      p.x = THREE.MathUtils.clamp(p.x, bounds.minX, bounds.maxX);
-      p.z = THREE.MathUtils.clamp(p.z, bounds.minZ, bounds.maxZ);
-
-      const probe = obj.clone();
-      probe.position.set(p.x, obj.position.y, p.z);
-      probe.position.y = findRestingY(probe);
-
-      if (!isOverlapping(probe, obj)) {
-        obj.position.copy(probe.position);
-        moved = true;
-      }
-    }
-    if (!moved) break;
-  }
-} */
 
 function tryPerturbOne(obj, step) {
-  const before = { pos: obj.position.clone(), rotY: obj.rotation.y };
-  const jitter = (v) => v + (Math.random() < 0.5 ? -1 : 1) * step; 
+    const before = { pos: obj.position.clone(), rotY: obj.rotation.y };
+    const jitter = (v) => v + (Math.random() < 0.5 ? -1 : 1) * step; 
 
-  if (Math.random() < 0.25) {
-    obj.rotation.y += (Math.random() < 0.5 ? 1 : -1) * Math.PI/2;
-  } else {
-    const bounds0 = boundsForObjectXZ(obj);
-    let nx = THREE.MathUtils.clamp(jitter(obj.position.x), bounds0.minX, bounds0.maxX);
-    let nz = THREE.MathUtils.clamp(jitter(obj.position.z), bounds0.minZ, bounds0.maxZ);
-    if (Math.abs(nx - obj.position.x) < 1e-6 && Math.abs(nz - obj.position.z) < 1e-6) {
-      nx = THREE.MathUtils.clamp(obj.position.x + (Math.random()<0.5?-1:1)*step, bounds0.minX, bounds0.maxX);
-      nz = THREE.MathUtils.clamp(obj.position.z + (Math.random()<0.5?-1:1)*step, bounds0.minZ, bounds0.maxZ);
+    if (Math.random() < 0.25) {
+        obj.rotation.y += (Math.random() < 0.5 ? 1 : -1) * Math.PI/2;
+    } else {
+        const bounds0 = boundsForObjectXZ(obj);
+        let nx = THREE.MathUtils.clamp(jitter(obj.position.x), bounds0.minX, bounds0.maxX);
+        let nz = THREE.MathUtils.clamp(jitter(obj.position.z), bounds0.minZ, bounds0.maxZ);
+        if (Math.abs(nx - obj.position.x) < 1e-6 && Math.abs(nz - obj.position.z) < 1e-6) {
+        nx = THREE.MathUtils.clamp(obj.position.x + (Math.random()<0.5?-1:1)*step, bounds0.minX, bounds0.maxX);
+        nz = THREE.MathUtils.clamp(obj.position.z + (Math.random()<0.5?-1:1)*step, bounds0.minZ, bounds0.maxZ);
+        }
+        obj.position.x = nx; obj.position.z = nz;
     }
-    obj.position.x = nx; obj.position.z = nz;
-  }
-  obj.position.y = findRestingY(obj);
-  /* clampInsideArea(obj); */
+    obj.position.y = findRestingY(obj);
+    /* clampInsideArea(obj); */
     const bounds1 = boundsForObjectXZ(obj);
     const inside =
         obj.position.x >= bounds1.minX - 1e-3 && obj.position.x <= bounds1.maxX + 1e-3 &&
@@ -634,91 +569,47 @@ async function runAnnealing(opts = {}) {
     const initTemp = opts.initTemp ?? 2.2;
     const cooling  = opts.cooling  ?? 0.996;
     const baseStep = opts.baseStep ?? 5; 
-    /* const chunk     = opts.chunk     ?? 160;
-    const fineEvery = opts.fineEvery ?? 20; */
-    /* const smallFrac = THREE.MathUtils.clamp(opts.smallFrac ?? 0.6, 0.1, 0.9); 
+    annealRunning = true;
+    uiToast('開始最佳化擺放');
+    let bestSnap   = snapshotState();
+    let bestEnergy = packingEnergy();
+    let T = initTemp;
+    for (let s = 0; s < steps && annealRunning; s++) {
+        const obj = objects[Math.floor(Math.random() * objects.length)];
+        const step = obj.userData?.unit || baseStep;
 
-  const ranked = objects.map((o, i) => ({ i, v: objectVolume(o) })).sort((a, b) => a.v - b.v);
-  const split = Math.max(1, Math.floor(ranked.length * smallFrac));
-  const smallIdx = ranked.slice(0, split).map(r => r.i);
-  const largeIdx = ranked.slice(split).map(r => r.i);
+        const e0 = packingEnergy();
+        let trial = { applied:false };
+        for (let k = 0; k < 30 && !trial.applied; k++) trial = tryPerturbOne(obj, step);
+        if (!trial.applied) { T *= cooling; if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r)); continue; }
 
-  const steps1 = Math.max(1, Math.floor(steps * 0.5)); 
-  const steps2 = steps - steps1;     */
-
-  annealRunning = true;
-/*   FAST_PACKING  = true; */
-  uiToast('開始最佳化擺放');
-
-  let bestSnap   = snapshotState();
-  let bestEnergy = packingEnergy();
-
-  let T = initTemp;
-  // 🔧 FIX: 直接從 objects 挑一個物體，不再使用被註解掉的小/大物體索引
-for (let s = 0; s < steps && annealRunning; s++) {
-  const obj = objects[Math.floor(Math.random() * objects.length)];
-  const step = obj.userData?.unit || baseStep;
-
-  const e0 = packingEnergy();
-  let trial = { applied:false };
-  for (let k = 0; k < 30 && !trial.applied; k++) trial = tryPerturbOne(obj, step);
-  if (!trial.applied) { T *= cooling; if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r)); continue; }
-
-  const e1 = packingEnergy();
-  const dE = e1 - e0;
-  const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
-  if (accept) {
-    if (e1 < bestEnergy) { bestEnergy = e1; bestSnap = snapshotState(); }
-  } else {
-    trial.undo && trial.undo();
-  }
-
-  T *= cooling;
-  if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r));
-}
-
-/* for (let s = 0; s < steps2 && annealRunning; s++) {
-    const pool = (largeIdx.length > 0 ? largeIdx : smallIdx);
-    const oi = pool[Math.floor(Math.random() * pool.length)];
-    const obj  = objects[oi];
-    const step = obj.userData?.unit || baseStep;
-
-    const e0 = packingEnergy();
-
-    let trial = { applied:false };
-    for (let k = 0; k < 30 && !trial.applied; k++) trial = tryPerturbOne(obj, step);
-    if (!trial.applied) { T *= cooling; if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r)); continue; }
-
-    const e1 = packingEnergy();
-    const dE = e1 - e0;
-    const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
-    if (accept) {
-        const curFine = (s % fineEvery === 0) ? packingEnergy(true) : e1;
-      if (e1 < bestEnergy) { bestEnergy = e1; bestSnap = snapshotState(); }
-    } else {
-      trial.undo && trial.undo();
+        const e1 = packingEnergy();
+        const dE = e1 - e0;
+        const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
+        if (accept) {
+            if (e1 < bestEnergy) { bestEnergy = e1; bestSnap = snapshotState(); }
+        } else {
+            trial.undo && trial.undo();
+        }
+        T *= cooling;
+        if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r));
     }
 
-    T *= cooling;
-    if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r));
-  } */
-  
-  if (annealRunning) {
-    restoreState(bestSnap);
-    uiToast('最佳化完成！');
-  } else {
-    uiToast('已停止最佳化');
-  }
+    if (annealRunning) {
+        restoreState(bestSnap);
+        uiToast('最佳化完成！');
+    } else {
+        uiToast('已停止最佳化');
+    }
     annealRunning = false;
-    /* FAST_PACKING  = false; */
 }
 
-
 document.getElementById('optimizeBtn')?.addEventListener('click', () => {
-  runAnnealing({ steps: 8000, initTemp: 2.2, cooling: 0.996, baseStep: 5 });
+    runAnnealing({ steps: 8000, initTemp: 2.2, cooling: 0.996, baseStep: 5 });
 });
+
 document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => {
-  annealRunning = false;
+    annealRunning = false;
 });
 
 function applyColorToMaterial(color) {
@@ -726,52 +617,57 @@ function applyColorToMaterial(color) {
 }
 
 function placeInsideContainer(mesh) {
-  const box = new THREE.Box3().setFromObject(mesh);
-  const size = new THREE.Vector3(); box.getSize(size);
-  const containerBox = new THREE.Box3().setFromObject(container);
-  const padding = 0.03;    
-  const grid = mesh.userData?.unit || null;
-  const step = grid ? grid : Math.max(0.25, Math.min(size.x, size.z) / 4);
-  const snap = (v, g) => g ? Math.round(v / g) * g : v;
-  const leftX = containerBox.min.x + size.x / 2 + padding;
-  const rightX = containerBox.max.x - size.x / 2 - padding;
-  const backZ = containerBox.min.z + size.z / 2 + padding;
-  const frontZ = containerBox.max.z - size.z / 2 - padding;
+    const box = new THREE.Box3().setFromObject(mesh);
+    const size = new THREE.Vector3(); box.getSize(size);
+    const containerBox = new THREE.Box3().setFromObject(container);
+    const padding = 0.03;    
+    const grid = mesh.userData?.unit || null;
+    const step = grid ? grid : Math.max(0.25, Math.min(size.x, size.z) / 4);
+    const snap = (v, g) => g ? Math.round(v / g) * g : v;
+    const leftX = containerBox.min.x + size.x / 2 + padding;
+    const rightX = containerBox.max.x - size.x / 2 - padding;
+    const backZ = containerBox.min.z + size.z / 2 + padding;
+    const frontZ = containerBox.max.z - size.z / 2 - padding;
 
-  for (let x = leftX; x <= rightX; x += step) {
-    for (let z = backZ; z <= frontZ; z += step) {
-      let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2 + padding;
-      const maxY = containerBox.max.y - size.y / 2 - padding;
-      while (y <= maxY) {
-        mesh.position.set(snap(x, grid), y, snap(z, grid));
-        mesh.position.y = findRestingY(mesh);
-        if (!isOverlapping(mesh)) {
-          scene.add(mesh);
-          objects.push(mesh);
-          /* clampInsideArea(mesh); */
-          return true;
+    for (let x = leftX; x <= rightX; x += step) {
+        for (let z = backZ; z <= frontZ; z += step) {
+        let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2 + padding;
+        const maxY = containerBox.max.y - size.y / 2 - padding;
+        while (y <= maxY) {
+            mesh.position.set(snap(x, grid), y, snap(z, grid));
+            mesh.position.y = findRestingY(mesh);
+            if (!isOverlapping(mesh)) {
+            scene.add(mesh);
+            objects.push(mesh);
+            return true;
+            }
+            y += 0.5;
         }
-        y += 0.5;
-      }
+        }
     }
-  }
-  return false;
+    return false;
 }
 
-function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight) {
+function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType = 'auto', holeAxis = 'y') {
     const material = applyColorToMaterial(color);
     let mesh;
     if (TETROMINO_TYPES.has(type)) {
         const unit = Number.isFinite(+width) ? +width : 20;
         mesh = buildTetrominoMesh(type, unit, material);
     } else if (type === 'cube') {
-        const outer = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
+        const outer0 = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
+        const outer  = toCSGReady(outer0);
         if (hasHole) {
-            const inner = new THREE.Mesh(new THREE.BoxGeometry(holeWidth, holeHeight, depth + 2), material);
-            outer.updateMatrix();
-            inner.updateMatrix();
+            const hole = makeHoleMesh ({
+                holeType : (holeType && holeType !== 'auto') ? holeType : 'box',
+                holeAxis, 
+                holeWidth, 
+                holeHeight, 
+                holeDepth: Math.max(width, height, depth) + 20
+            });
+            hole.position.copy(outer.position);
             try{
-                const result = CSG.subtract(outer, inner);
+                const result = CSG.subtract(outer, hole);
                 result.geometry.computeVertexNormals();
                 result.material = material;
                 mesh = result;
@@ -783,13 +679,17 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
             mesh = outer;
         }
     }else if (type === 'circle') {
-        const outer = new THREE.Mesh(new THREE.SphereGeometry(width / 2, 32, 32), material);
+        const R = Math.max(1, width * 0.5);
+        let outer = new THREE.Mesh(new THREE.SphereGeometry(R, 48, 48), material);
+        outer = toCSGReady(outer);
         if (hasHole) {
-            const inner = new THREE.Mesh(new THREE.SphereGeometry(holeWidth / 2, 32, 32),material);
-            outer.updateMatrix();
-            inner.updateMatrix();
+            const r = Math.max(0.5, (holeWidth || R * 0.5) * 0.5);
+            const h = width + 4; 
+            let hole = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 48), material);
+            hole.position.copy(outer.position);
+            hole = toCSGReady(hole);
             try{
-                const result = CSG.subtract(outer, inner);
+                const result = CSG.subtract(outer, hole);
                 result.geometry.computeVertexNormals();
                 result.material = material;
                 mesh = result;
@@ -800,62 +700,43 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         } else {
             mesh = outer;
         }
-    } else if (type === 'lshape') {
-        const EPS = 0.02;
-        const seatT   = Math.max(2, height * 0.22);       
-        const longLen = Math.max(6, width  * 0.95);       
-        const longD   = Math.max(6, depth  * 0.30);       
-        const shortW  = Math.max(6, width  * 0.50);       
-        const shortLen= Math.max(6, depth  * 0.55);       
-
-        const colW = Math.max(6, width  * 0.34);          
-        const colD = Math.max(6, depth  * 0.42);          
-        const colH = Math.max(8, height - seatT);         
-
-        const y0 = -height / 2;
-
-        const back = new THREE.Mesh(new THREE.BoxGeometry(colW, colH, colD), material);
-        back.position.set(0, y0 + seatT + colH / 2, 0);
-
-        const seatRight = new THREE.Mesh(new THREE.BoxGeometry(longLen, seatT, longD), material);
-        seatRight.position.set(back.position.x + colW / 2 + longLen / 2 - EPS, y0 + seatT / 2, 0);
-
-        const seatFront = new THREE.Mesh(new THREE.BoxGeometry(shortW, seatT, shortLen), material);
-        seatFront.position.set(back.position.x, y0 + seatT / 2, back.position.z + colD / 2 + shortLen / 2 - EPS);
-
-        try {
-            let combined = CSG.union(back, seatRight);
-            combined = CSG.union(combined, seatFront);
-            combined.geometry.computeVertexNormals();
-            combined.material = material;
-
-            if (hasHole) {
-                const holeBox = new THREE.Mesh(
-                    new THREE.BoxGeometry(
-                        Math.min(holeWidth  || shortW * 0.6, shortW * 0.9),
-                        Math.min(holeHeight || seatT  * 0.8, seatT  * 0.95),
-                        Math.min(longD * 0.85, longD - 1)
-                    ),
-                    material
-                );
-                holeBox.position.set(
-                    seatRight.position.x - longLen * 0.25,
-                    seatRight.position.y,
-                    seatRight.position.z
-                );
-                combined = CSG.subtract(combined, holeBox);
-                combined.geometry.computeVertexNormals();
-                combined.material = material;
-            }
-                mesh = combined;
-        } catch (err) {
-            console.warn('CSG 合併失敗，退回群組（仍含 EPS 重疊防縫）：', err);
-            const group = new THREE.Group();
-            group.add(back, seatRight, seatFront);
-            mesh = group;
-        }
+    } else if (type === 'lshape') { 
+        const edge = Math.max(1, width); 
+        const unitGeo = new THREE.BoxGeometry(edge, edge, edge); 
+        const coords = [ [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], ]; 
+        const make = (ix, iy, iz) => { 
+            const m = new THREE.Mesh(unitGeo.clone(), material); 
+            m.position.set(ix * edge, iy * edge, iz * edge); 
+            return toCSGReady(m); 
+        }; 
+        let combined = make(...coords[0]); 
+        for (let i = 1; i < coords.length; i++) { 
+            combined = CSG.union(combined, make(...coords[i])); 
+        } 
+        combined.geometry.computeVertexNormals(); 
+        combined.material = material; 
+        combined.geometry.computeBoundingBox(); 
+        const c = combined.geometry.boundingBox.getCenter(new THREE.Vector3()); 
+        combined.geometry.translate(-c.x, -c.y, -c.z); 
+        if (hasHole) { 
+            const size = new THREE.Vector3(); 
+            combined.geometry.boundingBox.getSize(size); 
+            const hw = Math.min(holeWidth || edge * 0.8, edge * 2.2); 
+            const hh = Math.min(holeHeight || edge * 0.8, edge * 1.8); 
+            const hd = size.z + 2; 
+            const hole = new THREE.Mesh(new THREE.BoxGeometry(hw, hh, hd), new THREE.MeshBasicMaterial()); 
+            hole.position.set(-edge * 0.25, -edge * 0.25, 0); 
+            try { 
+                const sub = CSG.subtract(toCSGReady(combined), toCSGReady(hole)); 
+                sub.geometry.computeVertexNormals(); 
+                sub.material = material; 
+                combined = sub; 
+            } catch (err) { 
+                console.warn('CSG 挖孔失敗，退回未挖孔圖形：', err); 
+            } 
+        } 
+        mesh = combined;
     } else {
-        // fallback
         mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
     }
     if (!placeInsideContainer(mesh)) {
@@ -864,7 +745,6 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
     mesh.userData.type = 'custom';
     mesh.userData.originalY = mesh.position.y;
 }
-
 
 let isDragging = false;
 let currentTarget = null;
@@ -879,6 +759,28 @@ const rotateStart = new THREE.Vector2();
 const initialRot = new THREE.Euler();
 
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+function liftOutOfOverlap(obj) {
+    const sb = new THREE.Box3().setFromObject(obj);
+    const s  = new THREE.Vector3(); sb.getSize(s);
+    const half = s.clone().multiplyScalar(0.5);
+
+    const area = getAreaByXZ(obj.position.x, obj.position.z) || 'container';
+    const b = getBoundsForArea(area, half);
+
+    const probe = obj.clone();
+    let y = THREE.MathUtils.clamp(obj.position.y, b.minY, b.maxY);
+    probe.position.set(obj.position.x, y, obj.position.z);
+
+    let guard = 0;
+    while (isOverlapping(probe, obj) && y <= b.maxY) {
+        y += 0.5;
+        probe.position.y = y;
+        if (++guard > 2000) break;
+    }
+    return y;
+}
+
 renderer.domElement.addEventListener('mousedown', (event) => {
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -909,7 +811,6 @@ renderer.domElement.addEventListener('mousedown', (event) => {
 
     if (event.button === 0) {
         const jumpHeight = 10;
-        //const originalY = findRestingY(currentTarget);
         const targBox = new THREE.Box3().setFromObject(currentTarget);
         const tsize = new THREE.Vector3(); targBox.getSize(tsize);
         const half = tsize.clone().multiplyScalar(0.5);
@@ -948,7 +849,11 @@ renderer.domElement.addEventListener('mouseup', () => {
         sb.getSize(s);
         const half = s.clone().multiplyScalar(0.5);
         const area = getAreaByXZ(selectedObj.position.x, selectedObj.position.z) || 'container';
-        selectedObj.position.y = findRestingYForArea(selectedObj, area, half);
+        if (!spaceDown) {
+            selectedObj.position.y = findRestingYForArea(selectedObj, area, half);
+        } else {
+            selectedObj.position.y = liftOutOfOverlap(selectedObj);
+        }
     }
 });
 
@@ -985,14 +890,13 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
         }
     } else {
         const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+        const targetBox = new THREE.Box3().setFromObject(currentTarget);
+        const targetSize = new THREE.Vector3(); targetBox.getSize(targetSize);
+        const halfSize = targetSize.clone().multiplyScalar(0.5);
         const b = getBoundsForArea(area, halfSize);
         const dy = (lastMouseY - event.clientY) * 0.1;
         let newY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
-        const testBox = currentTarget.clone();
-        testBox.position.set(currentTarget.position.x, newY, currentTarget.position.z);
-        if (!isOverlapping(testBox, currentTarget)) {
-            currentTarget.position.y = newY;
-        }
+        currentTarget.position.y = newY;
         lastMouseY = event.clientY;
     }
 });
@@ -1061,6 +965,11 @@ document.getElementById('generate').addEventListener('click', () => {
     const holeWidth = parseFloat(document.getElementById('holeWidth').value || 0);
     const holeHeight = parseFloat(document.getElementById('holeHeight').value || 0);
 
+    const holeTypeUI = document.getElementById('holeType')?.value;
+    const holeAxisUI = document.getElementById('holeAxis')?.value;
+    const holeType = (holeTypeUI || defaultHoleTypeByShape(type, hasHole));
+    const holeAxis = (holeAxisUI || 'y').toLowerCase();
+
     let width = 20, height = 20, depth = 20;
     if (type === 'cube') {
         width = parseFloat(document.getElementById('boxWidth').value || 20);
@@ -1071,22 +980,23 @@ document.getElementById('generate').addEventListener('click', () => {
         height = width;
         depth = width;
     } else if (type === 'lshape') {
-        width = parseFloat(document.getElementById('customWidth').value || 20);
-        height = parseFloat(document.getElementById('customHeight').value || 20);
-        depth = parseFloat(document.getElementById('customDepth').value || 20);
+        const unit = parseFloat(document.getElementById('customWidth').value || 20);
+        width  = unit;
+        height = unit;
+        depth  = unit;
     } else if (TETROMINO_TYPES.has(type)) {
-        width = parseFloat(document.getElementById('boxWidth').value || 20); // 單位邊長
+        width = parseFloat(document.getElementById('boxWidth').value || 20);
         height = depth = width;
     }
-    createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight);
-    addToLibrary({ type, width, height, depth, color, hasHole, holeWidth, holeHeight });
+    addToLibrary({ type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType, holeAxis });
+    createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType, holeAxis);
     clearFormFields();
 });
 
 function animate(time) {
     requestAnimationFrame( animate );
     controls.update();
-    TWEEN.update(time);
+    if (TWEEN && typeof TWEEN.update === 'function') TWEEN.update(time);
     if (selectionHelper && selectedObj) selectionHelper.update();
     renderer.render( scene, camera );
 }
@@ -1130,9 +1040,8 @@ window.addEventListener('DOMContentLoaded', () => {
             } else if (result.type === "circle") {
                 set("sphereWidth", result.width);
             } else if (result.type === "lshape") {
-                set("customWidth", result.width);
-                set("customHeight", result.height);
-                set("customDepth", result.depth);
+                document.getElementById('customWidth').value = result.width || 20;
+                set("boxWidth", result.width);
             }
             const canHole = !TETROMINO_TYPES.has(result.type);
             const holeChk = document.getElementById('hasHole');

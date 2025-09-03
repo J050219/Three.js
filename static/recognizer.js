@@ -73,17 +73,17 @@ export async function createRecognizer(videoElement) {
             const text = String(resJson.text || '');
             console.log('辨識結果:', text);
             window.__recognizeResult = text;
-            const extract = (regex) => {
+            const extract = (regex, fallback = 20) => {
                 const match = text.match(regex);
-                return match ? parseFloat(match[1]) : 20;
+                return match ? parseFloat(match[1]) : fallback;
             };
             const type =
-                /I\s*形|I型/i.test(text) ? 'tI' :
+                /(?:\b[iI]\s*形|\b[iI]\s*型|一字(?:形|型)?|長條(?:形)?|直條(?:形)?|直線(?:形)?|I[-\s]?shape)/i.test(text) ? 'tI' :
                 /T\s*形|T型/i.test(text) ? 'tT' :
                 /Z\s*形|Z型/i.test(text) ? 'tZ' :
                 /L\s*形|L型/i.test(text) ? 'tL' :
                 /(?:cube|立方)/i.test(text) ? 'cube' :
-                /(?:circle|球)/i.test(text) ? 'circle' :
+                /(?:circle|球體?|圓球|圓形)/i.test(text) ? 'circle' :
                 /(?:lshape|不規則)/i.test(text) ? 'lshape' : 'cube';
             const colorRaw = (text.match(/(紅|綠|藍|黃|紫|白|黑)(色)?/) || [])[0] || '綠色';
             const color = normalizeColor(colorRaw);
@@ -95,17 +95,22 @@ export async function createRecognizer(videoElement) {
                 width:  extract(/寬(?:度)?\D*(\d+(?:\.\d+)?)/i, 20),
                 height: extract(/高(?:度)?\D*(\d+(?:\.\d+)?)/i, 20),
                 depth:  extract(/深(?:度)?\D*(\d+(?:\.\d+)?)/i, 20),
-                radius: extract(/半徑\D*(\d+(?:\.\d+)?)/i, 20),
+                radius: extract(/半徑\D*(\d+(?:\.\d+)?)/i, 0),
                 color,
                 hasHole,
-                holeWidth:  extract(/(?:洞寬|孔寬)\D*(\d+(?:\.\d+)?)/i, 10),
-                holeHeight: extract(/(?:洞高|孔高)\D*(\d+(?:\.\d+)?)/i, 10)
+                holeWidth,
+                holeHeight
             };
             if (['tI','tT','tZ','tL'].includes(type)){
               result.height = result.depth = result.width || 20;
               result.hasHole = false;
             }
-            if (type==='circle'){ result.height=result.depth=result.width||20; }
+            if (type==='circle'){
+              if (result.radius && !isNaN(result.radius) && result.radius > 0) {
+                result.width = result.radius * 2;
+              }
+              result.height = result.depth = result.width || 20;
+            }
             showToast('✅ 辨識成功，已套用參數');
             setTimeout(hideToast, 800);
             if (typeof callback === 'function') callback(result);
