@@ -93,36 +93,46 @@ function defaultHoleTypeByShape(type, hasHole) {
     if (type === 'circle') return 'cyl'; 
     return 'box';
 }
+// 回傳指定軸向上的厚度
+function axisThickness(w, h, d, axis = 'y') {
+  axis = axis.toLowerCase();
+  return axis === 'x' ? w : axis === 'y' ? h : d;
+}
 
 function makeHoleMesh(opts = {}) {
-    const holeType = (opts.holeType || 'box').toLowerCase();
-    const axis = (opts.holeAxis || 'y').toLowerCase();
-    const width = Math.max(1, (opts.holeWidth || 10));
-    const height = Math.max(1, (opts.holeHeight || 10));
-    const depth = Math.max(1, (opts.holeDepth || 10));
+  const holeType = (opts.holeType || 'box').toLowerCase();
+  const axis     = (opts.holeAxis || 'y').toLowerCase();
+  const width    = Math.max(1, (opts.holeWidth  || 10));  // 橫向尺寸
+  const height   = Math.max(1, (opts.holeHeight || 10));  // 直向尺寸
+  const depth    = Math.max(1, (opts.holeDepth  || 10));  // ★ 沿軸向的厚度（會設定為物體厚度）
 
-    if (holeType === 'sphere') {
-        const r = Math.max(1, width * 0.5) - EPS;
-        const g = new THREE.SphereGeometry(r, 32, 32);
-        return toCSGReady(new THREE.Mesh(g, new THREE.MeshBasicMaterial()));
-    }
-    if (holeType === 'cyl') {
-        const r = Math.max(1, width * 0.5);
-        const h = depth + 2 * EPS;
-        const g = new THREE.CylinderGeometry(r, r, h, 32);
-        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
-        if (axis === 'x') m.rotation.z = Math.PI / 2;
-        if (axis === 'z') m.rotation.x = Math.PI / 2;
-        return toCSGReady(m);
-    }
-    let w = width  + 2 * EPS,
-        h = height + 2 * EPS,
-        d = depth  + 2 * EPS;
-    if (axis === 'x') { w = depth + 2 * EPS; }
-    else if (axis === 'y') { h = depth + 2 * EPS; }
-    else { d = depth + 2 * EPS; }
-    const g = new THREE.BoxGeometry(w, h, d);
+  if (holeType === 'sphere') {
+    const r = Math.max(1, width * 0.5) - EPS;
+    const g = new THREE.SphereGeometry(r, 32, 32);
     return toCSGReady(new THREE.Mesh(g, new THREE.MeshBasicMaterial()));
+  }
+
+  if (holeType === 'cyl') {
+    const r = Math.max(1, width * 0.5);
+    const h = depth + 2 * EPS; // ★ 貫穿並多一點餘量
+    const g = new THREE.CylinderGeometry(r, r, h, 32);
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
+    if (axis === 'x') m.rotation.z = Math.PI / 2;
+    if (axis === 'z') m.rotation.x = Math.PI / 2;
+    return toCSGReady(m);
+  }
+
+  // box 型孔：寬 × 高 為橫截面；depth 為沿軸向厚度
+  let w = width  + 2 * EPS;
+  let h = height + 2 * EPS;
+  let d = depth  + 2 * EPS;
+  // 把「沿軸向」的尺寸替換成 depth（讓它貫穿）
+  if (axis === 'x') { w = depth + 2 * EPS; }
+  else if (axis === 'y') { h = depth + 2 * EPS; }
+  else { d = depth + 2 * EPS; }
+
+  const g = new THREE.BoxGeometry(w, h, d);
+  return toCSGReady(new THREE.Mesh(g, new THREE.MeshBasicMaterial()));
 }
 
 function addToLibrary(params) {
@@ -140,7 +150,7 @@ function addToLibrary(params) {
         holeWidth:  n(params.holeWidth, 10),
         holeHeight: n(params.holeHeight, 10),
         holeType: params.holeType || defaultHoleTypeByShape(t, hasHoleClean),
-        holeAxis: (params.holeAxis || 'y').toLowerCase()
+        holeAxis: (params.holeAxis || 'z').toLowerCase()
     };
     console.log('[Library] add', clean);
     library.unshift(clean);
@@ -473,7 +483,7 @@ function findRestingYForArea(object, area, half) {
 /* =====================  模擬退火擺放最佳化  ===================== */
 
 // 估算精度：每軸的體素數（越大越準但越慢）
-const VOXEL_RES = 16;
+const VOXEL_RES = 12;
 
 // 能量權重：可自行調整
 const ENERGY_W_EMPTY     = 1.0;  // 空隙比例
@@ -981,12 +991,13 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         const outer0 = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
         const outer  = toCSGReady(outer0);
         if (hasHole) {
+            const full = axisThickness(width, height, depth, holeAxis);
             const hole = makeHoleMesh ({
                 holeType : (holeType && holeType !== 'auto') ? holeType : 'box',
                 holeAxis, 
                 holeWidth, 
                 holeHeight, 
-                holeDepth: Math.max(width, height, depth) + 20
+                holeDepth: full + 2 * EPS
             });
             hole.position.copy(outer.position);
             try{
@@ -1291,7 +1302,7 @@ document.getElementById('generate').addEventListener('click', () => {
     const holeTypeUI = document.getElementById('holeType')?.value;
     const holeAxisUI = document.getElementById('holeAxis')?.value;
     const holeType = (holeTypeUI || defaultHoleTypeByShape(type, hasHole));
-    const holeAxis = (holeAxisUI || 'y').toLowerCase();
+    const holeAxis = (holeAxisUI || 'z').toLowerCase();
 
     let width = 20, height = 20, depth = 20;
     if (type === 'cube') {
