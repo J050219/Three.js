@@ -196,6 +196,160 @@ function measureBlueVoidFast() {
   return { emptyVolume, emptyRatio, containerVolume, solidVolume };
 }
 
+/* ===================== 收斂曲線 (右上角) ===================== */
+const ConvergenceChart = (() => {
+  const S = {   // 狀態
+    el: null,    // wrapper
+    cvs: null,   // canvas
+    ctx: null,
+    data: [],    // {t:秒, y:百分比}
+    start: 0,
+    raf: 0,
+    maxPts: 600, // 最多點數（約10分鐘@1Hz）
+    running: false,
+    w: 280,
+    h: 140
+  };
+
+  function ensureUI() {
+    if (S.el) return;
+    const el = document.createElement('div');
+    el.id = 'convChart';
+    Object.assign(el.style, {
+      position:'fixed', right:'12px', top:'12px', zIndex:9999,
+      background:'rgba(0,0,0,.55)', borderRadius:'10px',
+      padding:'8px', color:'#fff', fontFamily:'system-ui,sans-serif',
+      userSelect:'none', pointerEvents:'none'   // 不擋滑鼠操作
+    });
+    const title = document.createElement('div');
+    title.textContent = '收斂曲線（空隙 %）';
+    Object.assign(title.style, { fontSize:'12px', opacity:.9, marginBottom:'4px' });
+
+    const cvs = document.createElement('canvas');
+    cvs.width = S.w; cvs.height = S.h;
+    cvs.style.display = 'block';
+
+    el.appendChild(title);
+    el.appendChild(cvs);
+    document.body.appendChild(el);
+
+    S.el = el; S.cvs = cvs; S.ctx = cvs.getContext('2d');
+    fitDPR();
+    addEventListener('resize', fitDPR);
+  }
+
+  function fitDPR() {
+    if (!S.cvs) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    S.cvs.width  = Math.round(S.w * dpr);
+    S.cvs.height = Math.round(S.h * dpr);
+    S.cvs.style.width  = S.w + 'px';
+    S.cvs.style.height = S.h + 'px';
+  }
+
+  function pushPoint() {
+    const r = measureBlueVoidFast();                 // 直接用你已有的估算
+    const y = Math.max(0, Math.min(100, r.emptyRatio * 100));
+    const t = (performance.now() - S.start) / 1000;  // 秒
+    S.data.push({ t, y });
+    if (S.data.length > S.maxPts) S.data.shift();
+  }
+
+  function yToPix(y) {
+    // y是百分比，0在底部、100在頂部
+    const p = S.cvs.height / (Math.min(window.devicePixelRatio || 1, 2));
+    return Math.round((1 - y / 100) * (p - 18) + 6); // 上下留白
+  }
+  function xToPix(i) {
+    // 均勻鋪滿整張圖
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = S.w;
+    const n = Math.max(1, S.data.length - 1);
+    return Math.round((i / n) * (w - 16) + 8) * dpr;
+  }
+
+  function draw() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const ctx = S.ctx; if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);           // reset to 1 CSS pixel
+    ctx.clearRect(0, 0, S.w, S.h);
+
+    // 座標系與格線
+    ctx.strokeStyle = 'rgba(255,255,255,.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(32, 6);   ctx.lineTo(32, S.h - 14);    // y 軸
+    ctx.lineTo(S.w - 6, S.h - 14);                    // x 軸
+    ctx.stroke();
+
+    // y 軸刻度（0/25/50/75/100）
+    ctx.fillStyle = 'rgba(255,255,255,.7)';
+    ctx.font = '10px system-ui';
+    [0,25,50,75,100].forEach(v=>{
+      const y = yToPix(v);
+      ctx.fillText(String(v), 6, y + 3);
+      ctx.strokeStyle = 'rgba(255,255,255,.12)';
+      ctx.beginPath();
+      ctx.moveTo(32, y); ctx.lineTo(S.w - 6, y);
+      ctx.stroke();
+    });
+
+    if (S.data.length < 2) return;
+
+    // 曲線
+    ctx.save();
+    ctx.beginPath();
+    for (let i=0;i<S.data.length;i++){
+      const px = xToPix(i) / dpr;
+      const py = yToPix(S.data[i].y);
+      if (i===0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#5ad3ff';  // 藍綠色
+    ctx.stroke();
+    ctx.restore();
+
+    // 右下角顯示最新數值
+    const latest = S.data[S.data.length-1].y;
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px system-ui';
+    ctx.fillText(`${latest.toFixed(1)}%`, S.w - 52, S.h - 22);
+  }
+
+  function loop() {
+    if (!S.running) return;
+    // 取樣頻率：~ 每 300ms 一筆，避免太密
+    if (!S._last || performance.now() - S._last > 300) {
+      S._last = performance.now();
+      pushPoint();
+      draw();
+    }
+    S.raf = requestAnimationFrame(loop);
+  }
+
+  function start() {
+    ensureUI();
+    S.data = [];
+    S.start = performance.now();
+    S.running = true;
+    S._last = 0;
+    cancelAnimationFrame(S.raf);
+    loop();
+  }
+
+  function stop() {
+    S.running = false;
+    cancelAnimationFrame(S.raf);
+    // 停下時再畫一次，確保最終值
+    pushPoint();
+    draw();
+  }
+
+  // 對外 API
+  return { start, stop, draw };
+})();
+
 const _collideRaycaster = new THREE.Raycaster();
 _collideRaycaster.firstHitOnly = false; 
 
@@ -1086,6 +1240,7 @@ async function runAnnealing(opts = {}) {
     const baseAngle = opts.baseAngle ?? (Math.PI / 18); 
 
     annealRunning = true;
+    ConvergenceChart.start();
     uiToast('開始最佳化擺放');
     let bestSnap   = snapshotState();
     let bestEnergy = packingEnergy();
@@ -1129,6 +1284,7 @@ async function runAnnealing(opts = {}) {
     } else {
         uiToast('已停止最佳化');
     }
+    ConvergenceChart.stop();  
     annealRunning = false;
 }
 
@@ -1138,6 +1294,7 @@ document.getElementById('optimizeBtn')?.addEventListener('click', () => {
 
 document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => {
     annealRunning = false;
+    ConvergenceChart.stop();
 });
 
 document.getElementById('voidBtn')?.addEventListener('click', showVoidStats);
