@@ -92,15 +92,116 @@ function toCSGReady(mesh) {
     return m;
 }
 
-// 🔧[新增] 幾何細判工具：點是否在網格內 / 兩網格是否真的相交
+function _meshWorldVolume(mesh) {
+  const g = mesh.geometry; if (!g || !g.attributes?.position) return 0;
+  mesh.updateMatrixWorld(true);
+  const m4 = mesh.matrixWorld, pos = g.attributes.position, idx = g.index ? g.index.array : null;
+  const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+  const t1 = new THREE.Vector3(), t2 = new THREE.Vector3();
+  let vol = 0;
+  const add = () => { t1.copy(v1).sub(v0); t2.copy(v2).sub(v0); vol += v0.dot(t1.cross(t2)) / 6; };
+  if (idx) for (let i=0;i<idx.length;i+=3){ v0.fromBufferAttribute(pos,idx[i]).applyMatrix4(m4);
+    v1.fromBufferAttribute(pos,idx[i+1]).applyMatrix4(m4);
+    v2.fromBufferAttribute(pos,idx[i+2]).applyMatrix4(m4); add(); }
+  else for (let i=0;i<pos.count;i+=3){ v0.fromBufferAttribute(pos,i).applyMatrix4(m4);
+    v1.fromBufferAttribute(pos,i+1).applyMatrix4(m4);
+    v2.fromBufferAttribute(pos,i+2).applyMatrix4(m4); add(); }
+  return Math.abs(vol);
+}
+
+function worldVolumeOfObject(root){ let sum=0; root.updateMatrixWorld(true);
+  root.traverse(n=>{ if(n.isMesh) sum+=_meshWorldVolume(n); }); return sum; }
+
+function makeContainerInteriorMesh() {
+  const cb = new THREE.Box3().setFromObject(container);
+  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+  const w = cb.max.x - cb.min.x, h = cb.max.y - palletTop, d = cb.max.z - cb.min.z;
+  if (h <= 0) return null;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshBasicMaterial());
+  m.position.set((cb.min.x+cb.max.x)/2, palletTop + h/2, (cb.min.z+cb.max.z)/2);
+  m.updateMatrixWorld(true);
+  return m;
+}
+
+function ensureVoidHUD() {
+  let el = document.getElementById('voidHud');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'voidHud';
+  Object.assign(el.style, {
+    position: 'fixed', right: '12px', bottom: '12px',
+    background: 'rgba(0,0,0,.65)', color: '#fff',
+    padding: '8px 10px', borderRadius: '8px',
+    fontFamily: 'system-ui, sans-serif', fontSize: '12px',
+    zIndex: 9999
+  });
+  document.body.appendChild(el);
+  return el;
+}
+
+function renderVoidHUD() {
+  const hud = ensureVoidHUD();
+  const r = measureBlueVoidFast();
+  hud.textContent =
+    `空隙 ${ (r.emptyRatio*100).toFixed(1) }%  ` ;
+}
+
+function showVoidStats() {
+  const r = measureBlueVoidFast();
+  const msg = `空隙 ${(r.emptyRatio*100).toFixed(1)}% `;
+  console.log('[Blue-Container Void]', r, msg);
+  if (typeof uiToast === 'function') uiToast(msg, 2200);
+  renderVoidHUD();
+}
+
+function getInteriorBox() {
+  const interior = makeContainerInteriorMesh();
+  if (!interior) return null;
+  return new THREE.Box3().setFromObject(interior);
+}
+
+function measureBlueVoidFast() {
+  const interiorBox = getInteriorBox();
+  if (!interiorBox) return { emptyVolume:0, emptyRatio:0, containerVolume:0, solidVolume:0 };
+
+  const containerVolume = (interiorBox.max.x - interiorBox.min.x) *
+                          (interiorBox.max.y - interiorBox.min.y) *
+                          (interiorBox.max.z - interiorBox.min.z);
+
+  let solidVolume = 0;
+  for (const o of objects) {
+    const ob = new THREE.Box3().setFromObject(o);
+    if (!interiorBox.intersectsBox(ob)) continue;
+
+    const objVol = worldVolumeOfObject(o); // 真實世界體積（非 AABB 體積）
+    if (interiorBox.containsBox(ob)) {
+      solidVolume += objVol;
+    } else {
+      const overlap = ob.clone().intersect(interiorBox);
+      if (!overlap.isEmpty()) {
+        const overVol = (overlap.max.x - overlap.min.x) *
+                        (overlap.max.y - overlap.min.y) *
+                        (overlap.max.z - overlap.min.z);
+        const aabbVol = (ob.max.x - ob.min.x) *
+                        (ob.max.y - ob.min.y) *
+                        (ob.max.z - ob.min.z);
+        const ratio = aabbVol > 0 ? Math.min(1, Math.max(0, overVol / aabbVol)) : 0;
+        solidVolume += objVol * ratio;
+      }
+    }
+  }
+
+  const emptyVolume = Math.max(0, containerVolume - solidVolume);
+  const emptyRatio  = containerVolume > 0 ? emptyVolume / containerVolume : 0;
+  return { emptyVolume, emptyRatio, containerVolume, solidVolume };
+}
+
 const _collideRaycaster = new THREE.Raycaster();
-_collideRaycaster.firstHitOnly = false; // 若有用 three-mesh-bvh 會更快
+_collideRaycaster.firstHitOnly = false; 
 
 function isPointInsideMesh(p, mesh) {
-  // 對 +X 方向打一條射線，奇偶規則判斷內外
   _collideRaycaster.set(p, new THREE.Vector3(1,0,0));
   const hits = _collideRaycaster.intersectObject(mesh, true);
-  // 忽略「剛好打在表面」的零距離雜訊
   const n = hits.filter(h => h.distance > 1e-6).length;
   return (n % 2) === 1;
 }
@@ -118,9 +219,7 @@ function getWorldAABBCorners(mesh){
     new THREE.Vector3(b.max.x,b.max.y,b.max.z),
   ];
 }
-// =====================================================
-// OBB 碰撞（含 fallback），避免任何重疊
-// =====================================================
+
 function buildMeshOBB(mesh) {
   const geo = mesh.geometry;
   if (!geo.boundingBox) geo.computeBoundingBox();
@@ -133,12 +232,12 @@ function buildMeshOBB(mesh) {
   const obb = new OBBClass(center.clone(), halfSize.clone());
   mesh.updateMatrixWorld(true);
   obb.applyMatrix4(mesh.matrixWorld);
-  obb.halfSize.subScalar(1e-4); // 避免貼面誤判相交
+  obb.halfSize.subScalar(1e-4); 
   return obb;
 }
 
 function meshesReallyIntersect_OBB(a, b) {
-  if (!HAS_OBB()) return null; // 無 OBB → 交給 fallback
+  if (!HAS_OBB()) return null; 
   const ba = new THREE.Box3().setFromObject(a);
   const bb = new THREE.Box3().setFromObject(b);
   if (!ba.intersectsBox(bb)) return false;
@@ -172,8 +271,37 @@ function meshesReallyIntersect_Fallback(a, b) {
   return false;
 }
 
-// ======= 球體幾何相交（Sphere vs Mesh）=======
-// 取球在世界座標的中心與半徑（考慮縮放）
+function meshesReallyIntersect_CSG(a, b) {
+  const ba = new THREE.Box3().setFromObject(a);
+  const bb = new THREE.Box3().setFromObject(b);
+  if (!ba.intersectsBox(bb)) return false;
+  let hit = false;
+  const aMeshes = [], bMeshes = [];
+  a.updateMatrixWorld(true);
+  b.updateMatrixWorld(true);
+  a.traverse(n => { if (n.isMesh) aMeshes.push(n); });
+  b.traverse(n => { if (n.isMesh) bMeshes.push(n); });
+
+  const EPS_VOL = 1e-3; 
+  for (const am of aMeshes) {
+    for (const bm of bMeshes) {
+      const ab = new THREE.Box3().setFromObject(am);
+      const bb2 = new THREE.Box3().setFromObject(bm);
+      if (!ab.intersectsBox(bb2)) continue;
+
+      try {
+        const inter = CSG.intersect(toCSGReady(am), toCSGReady(bm));
+        inter.updateMatrixWorld(true);
+        const vol = _meshWorldVolume(inter);
+        if (vol > EPS_VOL) { hit = true; break; }
+      } catch (e) {
+      }
+    }
+    if (hit) break;
+  }
+  return hit;
+}
+
 function getWorldSphereFromMesh(sphereMesh) {
   const center = new THREE.Vector3().setFromMatrixPosition(sphereMesh.matrixWorld);
   const s = new THREE.Vector3();
@@ -183,10 +311,10 @@ function getWorldSphereFromMesh(sphereMesh) {
   return { center, r: rWorld };
 }
 
-// 把 mesh 幾何的每個三角形轉成世界座標，做最近點距離測試
 function sphereIntersectsMeshTriangles(sphereMesh, otherMesh) {
   const { center, r } = getWorldSphereFromMesh(sphereMesh);
-  const r2 = r * r;
+  const rEff = Math.max(0, r - 1e-3);
+  const r2 = rEff * rEff;
 
   let hit = false;
   const tri = new THREE.Triangle();
@@ -222,25 +350,17 @@ function sphereIntersectsMeshTriangles(sphereMesh, otherMesh) {
     }
   };
 
-  // 先用 AABB 粗判
   const bb = new THREE.Box3().setFromObject(otherMesh);
   if (!bb.expandByScalar(r).containsPoint(center)) {
-    // 若球心離 bbox 太遠，直接不可能
     const sph = new THREE.Sphere(center, r);
     if (!bb.intersectsSphere || !bb.intersectsSphere(sph)) return false;
   }
-
-  // 三角形精判
   otherMesh.traverse(n => { if (!hit && n.isMesh) testOne(n); });
   if (hit) return true;
-
-  // 球心在網格內（整顆球包在裡面）也算重疊
   if (isPointInsideMesh(center, otherMesh)) return true;
-
   return false;
 }
 
-// 球體 vs 球體
 function sphereVsSphereIntersect(a, b) {
   const A = getWorldSphereFromMesh(a);
   const B = getWorldSphereFromMesh(b);
@@ -250,62 +370,34 @@ function sphereVsSphereIntersect(a, b) {
 
 // ✅ 統一入口（覆蓋舊的）：先處理球體，再用 OBB，最後才 fallback
 function meshesReallyIntersect(a, b) {
-  // AABB 粗判
   const ba = new THREE.Box3().setFromObject(a);
   const bb = new THREE.Box3().setFromObject(b);
   if (!ba.intersectsBox(bb)) return false;
-
   const aSphere = !!a.userData?.isSphere;
   const bSphere = !!b.userData?.isSphere;
-
-  // 球體相關的精判
   if (aSphere && bSphere) return sphereVsSphereIntersect(a, b);
   if (aSphere) {
     let hit = false;
     b.traverse(n => { if (!hit && n.isMesh) hit = sphereIntersectsMeshTriangles(a, n); });
-    return hit;
-  }
-  if (bSphere) {
+    if (hit) return true;
+  } else if (bSphere) {
     let hit = false;
     a.traverse(n => { if (!hit && n.isMesh) hit = sphereIntersectsMeshTriangles(b, n); });
-    return hit;
+    if (hit) return true;
   }
-
-  // 其餘形狀：先 OBB 後 fallback
   const r = meshesReallyIntersect_OBB(a, b);
-  if (r === true || r === false) return r;
-  return meshesReallyIntersect_Fallback(a, b);
+  if (r === true) return true;
+  if (meshesReallyIntersect_Fallback(a, b)) return true;
+  if (aSphere || bSphere) return false;
+  return meshesReallyIntersect_CSG(a, b);
 }
-
-/* // ✅ 統一入口：先用 OBB，沒有就 fallback
-function meshesReallyIntersect(a, b) {
-  const r = meshesReallyIntersect_OBB(a, b);
-  if (r === true || r === false) return r;
-  return meshesReallyIntersect_Fallback(a, b);
-} */
-
-// 🔧[新增] 網格-網格細判：AABB 先粗判，重疊才做「角點在對方內」檢查
-/* function meshesReallyIntersect(a, b) {
-  const ba = new THREE.Box3().setFromObject(a);
-  const bb = new THREE.Box3().setFromObject(b);
-  if (!ba.intersectsBox(bb)) return false; // 粗判不重疊，直接安全
-
-  // 角點在對方體內(奇偶規則) → 確實相交
-  const ac = getWorldAABBCorners(a);
-  for (const p of ac) if (isPointInsideMesh(p, b)) return true;
-
-  const bc = getWorldAABBCorners(b);
-  for (const p of bc) if (isPointInsideMesh(p, a)) return true;
-
-  return false;
-} */
 
 function defaultHoleTypeByShape(type, hasHole) {
     if (!hasHole) return 'none';
     if (type === 'circle') return 'cyl'; 
     return 'box';
 }
-// 回傳指定軸向上的厚度
+
 function axisThickness(w, h, d, axis = 'y') {
   axis = axis.toLowerCase();
   return axis === 'x' ? w : axis === 'y' ? h : d;
@@ -314,9 +406,9 @@ function axisThickness(w, h, d, axis = 'y') {
 function makeHoleMesh(opts = {}) {
   const holeType = (opts.holeType || 'box').toLowerCase();
   const axis     = (opts.holeAxis || 'y').toLowerCase();
-  const width    = Math.max(1, (opts.holeWidth  || 10));  // 橫向尺寸
-  const height   = Math.max(1, (opts.holeHeight || 10));  // 直向尺寸
-  const depth    = Math.max(1, (opts.holeDepth  || 10));  // ★ 沿軸向的厚度（會設定為物體厚度）
+  const width    = Math.max(1, (opts.holeWidth  || 10));  
+  const height   = Math.max(1, (opts.holeHeight || 10));  
+  const depth    = Math.max(1, (opts.holeDepth  || 10));  
 
   if (holeType === 'sphere') {
     const r = Math.max(1, width * 0.5) - EPS;
@@ -326,19 +418,15 @@ function makeHoleMesh(opts = {}) {
 
   if (holeType === 'cyl') {
     const r = Math.max(1, width * 0.5);
-    const h = depth + 2 * EPS; // ★ 貫穿並多一點餘量
+    const h = depth + 2 * EPS; 
     const g = new THREE.CylinderGeometry(r, r, h, 24);
     const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
     if (axis === 'x') m.rotation.z = Math.PI / 2;
     if (axis === 'z') m.rotation.x = Math.PI / 2;
     return toCSGReady(m);
   }
-
-  // box 型孔：寬 × 高 為橫截面；depth 為沿軸向厚度
-  let w = width  + 2 * EPS;
   let h = height + 2 * EPS;
   let d = depth  + 2 * EPS;
-  // 把「沿軸向」的尺寸替換成 depth（讓它貫穿）
   if (axis === 'x') { w = depth + 2 * EPS; }
   else if (axis === 'y') { h = depth + 2 * EPS; }
   else { d = depth + 2 * EPS; }
@@ -479,6 +567,7 @@ function deleteSelected() {
     scene.remove(selectedObj);
     selectedObj = null;
     if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+    renderVoidHUD();
 }
 
 function clearAllObjects() {
@@ -486,6 +575,7 @@ function clearAllObjects() {
     objects.length = 0;
     selectedObj = null;
     if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+    renderVoidHUD();
 }
 
 function ensureSceneButtons() {
@@ -507,7 +597,6 @@ function ensureSceneButtons() {
         ui.appendChild(b2);
         b2.addEventListener('click', clearAllObjects);
     }
-    // ★ 新增「估算空隙」按鈕
     if (!document.getElementById('voidBtn')) {
     const b3 = document.createElement('button');
     b3.id = 'voidBtn';
@@ -601,25 +690,6 @@ function _collectAABBs(root) {
     });
     return boxes;
 }
-    
-/* function isOverlapping(ncandidate, ignore = null, eps = 1e-3) {
-    const cand = _collectAABBs(ncandidate);
-    for (const obj of objects) {
-        if (obj === ignore) continue;
-        const obs = _collectAABBs(obj);
-        for (const c of cand) {
-            for (const o of obs) {
-                if (c.max.x - eps > o.min.x && c.min.x + eps < o.max.x &&
-                    c.max.y - eps > o.min.y && c.min.y + eps < o.max.y &&
-                    c.max.z - eps > o.min.z && c.min.z + eps < o.max.z) {
-                    const vertical = c.max.y <= o.min.y + eps || c.min.y >= o.max.y - eps;
-                    if (!vertical) return true;
-                }
-            }
-        }
-    }
-    return false;
-} */
 
 function isOverlapping(ncandidate, ignore = null, eps = 1e-3) {
   const candMeshes = [];
@@ -633,22 +703,26 @@ function isOverlapping(ncandidate, ignore = null, eps = 1e-3) {
     obj.updateMatrixWorld(true);
     obj.traverse(n => { if (n.isMesh) otherMeshes.push(n); });
 
-    // 🔧[修改] 先 AABB 粗判，再做幾何細判（允許底下空腔被利用）
     for (const cm of candMeshes) {
       for (const om of otherMeshes) {
         const a = new THREE.Box3().setFromObject(cm);
         const b = new THREE.Box3().setFromObject(om);
-        if (!a.intersectsBox(b)) continue;        // 粗判沒撞
-        if (meshesReallyIntersect(cm, om)) return true; // ✅ 真的相交才算撞
+        if (!a.intersectsBox(b)) continue;  
+        if (meshesReallyIntersect(cm, om)) return true; 
       }
     }
   }
   return false;
 }
 
+function _cloneForTest(o) {
+  const c = o.clone(true);
+  c.userData = { ...o.userData };
+  return c;
+}
 
 function findRestingY(object) {
-    const clone = object.clone();
+    const clone = _cloneForTest(object);
     const box = new THREE.Box3().setFromObject(object);
     const size = new THREE.Vector3();
     box.getSize(size);
@@ -707,7 +781,7 @@ function getBoundsForArea(area, half) {
 
 function findRestingYForArea(object, area, half) {
     const { baseY, maxY } = getBoundsForArea(area, half);
-    const clone = object.clone();
+    const clone = _cloneForTest(object);
     let y = baseY + half.y;
     while (y <= maxY) {
         clone.position.set(object.position.x, y, object.position.z);
@@ -718,14 +792,9 @@ function findRestingYForArea(object, area, half) {
 }
 
 /* =====================  模擬退火擺放最佳化  ===================== */
-
-// 估算精度：每軸的體素數（越大越準但越慢）
 const VOXEL_RES = 12;
-
-// 🔧[新增] 鎖定直角姿態
 const RIGHT_ANGLES = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
 
-// 能量權重：可自行調整
 const ENERGY_W_EMPTY     = 1.0;  // 空隙比例
 const ENERGY_W_FRAGMENT  = 0.6; // 空隙破碎度（1 - 最大連通空隙比例）
 
@@ -744,17 +813,11 @@ function uiToast(msg, ms = 1400) {
     el.style.display = 'block';
     clearTimeout(el._h); el._h = setTimeout(()=> el.style.display='none', ms);
 }
-// =====================================================
-// 視角跟隨：讓畫面在最佳化時跟著移動
-// =====================================================
 let _viewTween = null;
-
 function nudgeViewToTarget(targetVec, ms = 200) {
-  // 以維持視角相對位移的方式，平滑移動 controls.target 與 camera.position
   const startTarget = controls.target.clone();
   const startCamPos = camera.position.clone();
   const delta = new THREE.Vector3().subVectors(targetVec, startTarget);
-
   const state = { t: 0 };
   _viewTween?.stop();
   _viewTween = new TWEEN.Tween(state)
@@ -769,10 +832,8 @@ function nudgeViewToTarget(targetVec, ms = 200) {
     .start();
 }
 
-// 以所有物體（含容器）計算一個要跟隨的中心
 function computeFollowCenter() {
   const box = new THREE.Box3();
-  // 集合：容器 + 目前 objects
   box.expandByObject(container);
   for (const o of objects) box.expandByObject(o);
   const c = new THREE.Vector3();
@@ -780,57 +841,10 @@ function computeFollowCenter() {
   return c;
 }
 
-// 在最佳化過程中輕推視角
 function nudgeViewDuringOptimization(pivotObject = null, ms = 160) {
   const focus = pivotObject ? pivotObject.getWorldPosition(new THREE.Vector3())
                             : computeFollowCenter();
   nudgeViewToTarget(focus, ms);
-}
-
-// ★ 空隙估算（以體素化 + 物體 AABB 近似）
-function measureVoidInContainer() {
-  const cb = new THREE.Box3().setFromObject(container);
-  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-
-  // 容器有效空間：棧板上表面 → 容器頂
-  const min = new THREE.Vector3(cb.min.x, palletTop, cb.min.z);
-  const max = new THREE.Vector3(cb.max.x, cb.max.y, cb.max.z);
-
-  const nx = VOXEL_RES, ny = VOXEL_RES, nz = VOXEL_RES;
-  const dx = (max.x - min.x) / nx;
-  const dy = (max.y - min.y) / ny;
-  const dz = (max.z - min.z) / nz;
-  const total = nx * ny * nz;
-  const voxelVolume = dx * dy * dz;
-
-  // 先用每個物體的 AABB（Box3）近似是否佔用
-  const boxes = objects.map(o => new THREE.Box3().setFromObject(o));
-
-  const p = new THREE.Vector3();
-  let emptyCount = 0, occCount = 0;
-
-  for (let j = 0; j < ny; j++) {
-    const y = min.y + (j + 0.5) * dy;
-    for (let k = 0; k < nz; k++) {
-      const z = min.z + (k + 0.5) * dz;
-      for (let i = 0; i < nx; i++) {
-        const x = min.x + (i + 0.5) * dx;
-        p.set(x, y, z);
-
-        let occ = false;
-        for (let b = 0; b < boxes.length && !occ; b++) {
-          if (boxes[b].containsPoint(p)) occ = true;
-        }
-        if (occ) occCount++; else emptyCount++;
-      }
-    }
-  }
-
-  const emptyVolume  = emptyCount * voxelVolume;
-  const containerVolume = (max.x - min.x) * (max.y - min.y) * (max.z - min.z);
-  const emptyRatio   = emptyVolume / containerVolume;
-
-  return { emptyVolume, emptyRatio, containerVolume, voxelsEmpty: emptyCount, voxelsTotal: total };
 }
 
 function packingEnergy() {
@@ -841,27 +855,18 @@ function packingEnergy() {
 
     const min = new THREE.Vector3(cb.min.x, palletTop, cb.min.z);
   const max = new THREE.Vector3(cb.max.x, cb.max.y, cb.max.z);
-
-  // 體素網格大小
   const nx = VOXEL_RES, ny = VOXEL_RES, nz = VOXEL_RES;
   const dx = (max.x - min.x) / nx;
   const dy = (max.y - min.y) / ny;
   const dz = (max.z - min.z) / nz;
   const total = nx * ny * nz;
-
   if (total <= 0) return 0;
-
-  // 以物體的 AABB 近似佔用（速度快；若要更準可改成射線/點內測試）
   const boxes = objects.map(o => new THREE.Box3().setFromObject(o));
   const grid = new Uint8Array(total);   // 1 = 佔用；0 = 空
-
   const p = new THREE.Vector3();
   let emptyCount = 0;
-
-  // 取 index 對應
   const toIndex = (i, j, k) => (j * nz + k) * nx + i;
 
-  // 掃描體素
   for (let j = 0; j < ny; j++) {
     const y = min.y + (j + 0.5) * dy;
     for (let k = 0; k < nz; k++) {
@@ -869,9 +874,7 @@ function packingEnergy() {
       for (let i = 0; i < nx; i++) {
         const x = min.x + (i + 0.5) * dx;
         p.set(x, y, z);
-
         let occ = false;
-        // 任何一個物體的包圍盒含住該點就視為佔用（快速近似）
         for (let b = 0; b < boxes.length && !occ; b++) {
           if (boxes[b].containsPoint(p)) occ = true;
         }
@@ -881,10 +884,8 @@ function packingEnergy() {
       }
     }
   }
-
   if (emptyCount === 0) return 0; // 沒空隙 = 最佳
-
-  // ---- 找最大連通空隙（6-鄰接）----
+  
   const visited = new Uint8Array(total);
   const q = new Uint32Array(total);
   let largest = 0;
@@ -899,10 +900,8 @@ function packingEnergy() {
         let head = 0, tail = 0, size = 0;
         visited[start] = 1;
         q[tail++] = start;
-
         while (head < tail) {
           const cur = q[head++]; size++;
-
           const ii = cur % nx;
           const jk = (cur - ii) / nx;
           const kk = jk % nz;
@@ -953,14 +952,6 @@ function packingEnergy() {
          ENERGY_W_FRAGMENT * (1 - largestVoidRatio);
 }
 
-// ★ 用 toast/console 輸出空隙資訊
-function showVoidStats() {
-  const s = measureVoidInContainer();
-  const msg = `空隙體積 ≈ ${s.emptyVolume.toFixed(2)}（約 ${(s.emptyRatio*100).toFixed(1)}%）`;
-  console.log('[空隙統計]', s, msg);
-  if (typeof uiToast === 'function') uiToast(msg, 2000);
-}
-
 function snapshotState() {
     return objects.map(o => ({
         obj: o,
@@ -968,6 +959,7 @@ function snapshotState() {
         rot: o.rotation.clone(),
     }));
 }
+
 function restoreState(snap) {
     snap.forEach(s => { s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); });
 }
@@ -986,77 +978,6 @@ function boundsForObjectXZ(obj) {
     };
 }
 
-/* function tryPerturbOne(obj, linStep, angStep) {
-    const before = { pos: obj.position.clone(), rot: obj.rotation.clone() };
-    const mode = Math.random();
-    
-    // ===== A. 平移擾動 =====
-  if (mode < 0.45) {
-    const jitter = (v) => v + (Math.random() < 0.5 ? -1 : 1) * linStep;
-
-    const bounds0 = boundsForObjectXZ(obj);
-    let nx = THREE.MathUtils.clamp(jitter(obj.position.x), bounds0.minX, bounds0.maxX);
-    let nz = THREE.MathUtils.clamp(jitter(obj.position.z), bounds0.minZ, bounds0.maxZ);
-
-    // 真的沒動就再給一次隨機
-    if (Math.abs(nx - obj.position.x) < 1e-6 && Math.abs(nz - obj.position.z) < 1e-6) {
-      nx = THREE.MathUtils.clamp(obj.position.x + (Math.random()<0.5?-1:1)*linStep, bounds0.minX, bounds0.maxX);
-      nz = THREE.MathUtils.clamp(obj.position.z + (Math.random()<0.5?-1:1)*linStep, bounds0.minZ, bounds0.maxZ);
-    }
-    obj.position.x = nx;
-    obj.position.z = nz;
-
-  // ===== B. 旋轉擾動 =====
-  } else {
-    // 50% 用 90° 快速轉向；50% 用小角度微調（更精細）
-    const snap = Math.random() < 0.5;
-
-    if (snap) {
-      const axis = Math.floor(Math.random() * 3);            // 0:x, 1:y, 2:z
-      const delta = (Math.random() < 0.5 ? 1 : -1) * Math.PI/2;
-      if (axis === 0) obj.rotation.x += delta;
-      if (axis === 1) obj.rotation.y += delta;
-      if (axis === 2) obj.rotation.z += delta;
-    } else {
-      // 小角度三軸同時微調（±angStep）
-      const r = () => (Math.random() * 2 - 1) * angStep;
-      obj.rotation.x += r();
-      obj.rotation.y += r();
-      obj.rotation.z += r();
-    }
-
-    // 旋轉後幾何外接盒改變，x/z 位置可能需要夾回容器
-    const b = boundsForObjectXZ(obj);
-    obj.position.x = THREE.MathUtils.clamp(obj.position.x, b.minX, b.maxX);
-    obj.position.z = THREE.MathUtils.clamp(obj.position.z, b.minZ, b.maxZ);
-  }
-
-  // 每次變動後都讓物體落在當前可安置的最低點
-  obj.position.y = findRestingY(obj);
-
-  // 邊界/碰撞檢查，不合法就復原
-  const bounds1 = boundsForObjectXZ(obj);
-  const inside =
-    obj.position.x >= bounds1.minX - 1e-3 && obj.position.x <= bounds1.maxX + 1e-3 &&
-    obj.position.z >= bounds1.minZ - 1e-3 && obj.position.z <= bounds1.maxZ + 1e-3;
-
-  if (!inside || isOverlapping(obj, obj)) {
-    obj.position.copy(before.pos);
-    obj.rotation.copy(before.rot);
-    return { applied: false };
-  }
-
-  // 可被退回的 undo
-  return {
-    applied: true,
-    undo: () => {
-      obj.position.copy(before.pos);
-      obj.rotation.copy(before.rot);
-    }
-  };
-} */    
-
-  // 🔧[重寫] 只做水平位移 + 繞 Y 的 90° 旋轉，避免傾斜造成孔隙
 function tryPerturbOne(obj, linStep) {
   const before = { pos: obj.position.clone(), rot: obj.rotation.clone() };
   const mode = Math.random();
@@ -1069,7 +990,6 @@ function tryPerturbOne(obj, linStep) {
     obj.position.x = THREE.MathUtils.clamp(obj.position.x + dx, b.minX, b.maxX);
     obj.position.z = THREE.MathUtils.clamp(obj.position.z + dz, b.minZ, b.maxZ);
   } else {
-    // 只繞 Y 軸換 90°
     const curY = obj.rotation.y;
     const ny = RIGHT_ANGLES[(RIGHT_ANGLES.findIndex(a=>Math.abs(a-curY)% (Math.PI*2)<1e-6)+ (Math.random()<0.5?-1:1) + RIGHT_ANGLES.length)%RIGHT_ANGLES.length];
     obj.rotation.set(0, ny, 0);
@@ -1090,54 +1010,6 @@ function tryPerturbOne(obj, linStep) {
   return { applied:true, undo:()=>{ obj.position.copy(before.pos); obj.rotation.copy(before.rot);} };
 }
 
-// 在 0, 90, 180, 270 三軸離散角度中找最緊密的朝向
-/* function tryBestAxisOrientation(obj) {
-  const beforePos = obj.position.clone();
-  const beforeRot = obj.rotation.clone();
-
-  const angles = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
-  let best = { energy: Infinity, rot: beforeRot.clone(), pos: beforePos.clone() };
-
-  // 先算基準能量
-  const eBase = packingEnergy();
-
-  for (const ax of angles) {
-    for (const ay of angles) {
-      for (const az of angles) {
-        obj.rotation.set(ax, ay, az);
-
-        // 旋轉後 AABB 變了，夾回容器 + 重新落地
-        const b = boundsForObjectXZ(obj);
-        obj.position.x = THREE.MathUtils.clamp(obj.position.x, b.minX, b.maxX);
-        obj.position.z = THREE.MathUtils.clamp(obj.position.z, b.minZ, b.maxZ);
-        obj.position.y = findRestingY(obj);
-
-        if (isOverlapping(obj, obj)) continue;
-
-        const e = packingEnergy();
-        if (e < best.energy) {
-          best.energy = e;
-          best.rot.copy(obj.rotation);
-          best.pos.copy(obj.position);
-        }
-      }
-    }
-  }
-
-  // 有更好就採用；否則復原
-  if (best.energy + 1e-9 < eBase) {
-    obj.rotation.copy(best.rot);
-    obj.position.copy(best.pos);
-    return true;
-  } else {
-    obj.rotation.copy(beforeRot);
-    obj.position.copy(beforePos);
-    return false;
-  }
-}
- */
-
-// 🔧[新增] 離散直角，只繞 Y 角找最佳
 function tryBestAxisOrientation_Y(obj){
   const beforePos = obj.position.clone(), beforeRot = obj.rotation.clone();
   let best = { energy: Infinity, rot: beforeRot.clone(), pos: beforePos.clone() };
@@ -1160,32 +1032,23 @@ function tryBestAxisOrientation_Y(obj){
 function anchorScore(obj) {
   const cb = new THREE.Box3().setFromObject(container);
   const b  = new THREE.Box3().setFromObject(obj);
-  // 越小代表越靠左/靠後與越低（優先靠角與貼底）
   return (b.min.x - cb.min.x) + (b.min.z - cb.min.z) + 0.25 * Math.max(0, b.min.y - (pallet.position.y + pallet.geometry.parameters.height / 2));
 }
 
-// 讓所有物體依序下墜，並沿 ±X/±Z 小步搜，找到更小能量就前進
 function globalCompaction(passes = 3) {
   const stepFor = (o) => Math.max(0.5, o.userData?.unit || 2);
-
   for (let t = 0; t < passes; t++) {
-    // 隨機順序比較不容易卡住
     const order = objects.slice().sort(() => Math.random() - 0.5);
-
     for (const o of order) {
-      // 先確實落地
       o.position.y = findRestingY(o);
-
       let improved = true;
       while (improved) {
         improved = false;
         const e0 = packingEnergy();
         const s  = stepFor(o);
         const b  = boundsForObjectXZ(o);
-
         const tryMove = (dx, dz) => {
-          /* const old = o.position.clone(); */
-          const oldPos = o.position.clone();                // 🔧 先存舊位置
+          const oldPos = o.position.clone();               
           const oldScore = anchorScore(o);
           o.position.x = THREE.MathUtils.clamp(o.position.x + dx * s, b.minX, b.maxX);
           o.position.z = THREE.MathUtils.clamp(o.position.z + dz * s, b.minZ, b.maxZ);
@@ -1195,12 +1058,8 @@ function globalCompaction(passes = 3) {
             const e1 = packingEnergy();
             if (e1 < e0 - 1e-6) { improved = true; return true; }
             nudgeViewDuringOptimization(o, 140);
-
             if (Math.abs(e1 - e0) < 1e-6) {
-            /* const m0 = anchorScore(o); // 原位置度量
-            const m1 = anchorScore(o); // 現在位置（o 已在新位置）
-            if (m1 < m0 - 1e-6) { improved = true; return true; } */
-            const newScore = anchorScore(o);             // 🔧 比較新舊分數
+            const newScore = anchorScore(o);          
               if (newScore < oldScore - 1e-6) { improved = true; return true; }
               nudgeViewDuringOptimization(o, 140);
             }
@@ -1208,8 +1067,6 @@ function globalCompaction(passes = 3) {
       o.position.copy(oldPos);
       return false;
     };
-
-        // 4 方向各試一次；一旦成功就再進下一輪 while
         tryMove( 1, 0) || tryMove(-1, 0) || tryMove(0,  1) || tryMove(0, -1);
       }
     }
@@ -1226,7 +1083,7 @@ async function runAnnealing(opts = {}) {
     const initTemp = opts.initTemp ?? 120;
     const cooling  = opts.cooling  ?? 0.997;
     const baseStep = opts.baseStep ?? 4; 
-    const baseAngle = opts.baseAngle ?? (Math.PI / 18);   // 角度步長（預設 10°）
+    const baseAngle = opts.baseAngle ?? (Math.PI / 18); 
 
     annealRunning = true;
     uiToast('開始最佳化擺放');
@@ -1251,7 +1108,6 @@ async function runAnnealing(opts = {}) {
             if (Math.random() < 0.25) {
                 tryBestAxisOrientation_Y(obj);
             }
-            // 週期性全域壓實（讓物體持續下沉、靠牆）
             if (s % 300 === 0) {
                 globalCompaction(1);
             }
@@ -1262,14 +1118,13 @@ async function runAnnealing(opts = {}) {
             T *= cooling;
             if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r));
         }
-
     if (annealRunning) {
         restoreState(bestSnap);
-        // 🔧[新增]
         shakeAndSettle();
-        nudgeViewDuringOptimization(null, 260); // ✅ 收斂後看整體
-        globalCompaction(2);     // 最後收斂一下
-        showVoidStats && showVoidStats(); // 顯示剩餘空隙
+        nudgeViewDuringOptimization(null, 260); 
+        globalCompaction(2); 
+        showVoidStats && showVoidStats(); 
+        renderVoidHUD();
         uiToast('最佳化完成！');
     } else {
         uiToast('已停止最佳化');
@@ -1285,43 +1140,11 @@ document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => {
     annealRunning = false;
 });
 
+document.getElementById('voidBtn')?.addEventListener('click', showVoidStats);
+
 function applyColorToMaterial(color) {
     return new THREE.MeshStandardMaterial({ color: new THREE.Color(normalizeColor(color)) });
 }
-
-/* function placeInsideContainer(mesh) {
-    const box = new THREE.Box3().setFromObject(mesh);
-    const size = new THREE.Vector3(); box.getSize(size);
-    const containerBox = new THREE.Box3().setFromObject(container);
-    const padding = 0.03;    
-    const grid = mesh.userData?.unit || null;
-    const step = grid ? grid : Math.max(0.25, Math.min(size.x, size.z) / 4);
-    const snap = (v, g) => g ? Math.round(v / g) * g : v;
-    const leftX = containerBox.min.x + size.x / 2 + padding;
-    const rightX = containerBox.max.x - size.x / 2 - padding;
-    const backZ = containerBox.min.z + size.z / 2 + padding;
-    const frontZ = containerBox.max.z - size.z / 2 - padding;
-
-    for (let x = leftX; x <= rightX; x += step) {
-        for (let z = backZ; z <= frontZ; z += step) {
-        let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2 + padding;
-        const maxY = containerBox.max.y - size.y / 2 - padding;
-        while (y <= maxY) {
-            mesh.position.set(snap(x, grid), y, snap(z, grid));
-            mesh.position.y = findRestingY(mesh);
-            if (!isOverlapping(mesh)) {
-            scene.add(mesh);
-            objects.push(mesh);
-            tryBestAxisOrientation(mesh);
-            globalCompaction(1);
-            return true;
-            }
-            y += 0.5;
-        }
-        }
-    }
-    return false;
-} */
 
 function isInsideContainerAABB(obj, eps = 1e-3) {
   const cb = new THREE.Box3().setFromObject(container);
@@ -1337,9 +1160,7 @@ function isInsideContainerAABB(obj, eps = 1e-3) {
   );
 }
 
-// 暫時把候選物件加入 objects 算能量，再立刻移除
 function packingEnergyWithCandidate(candidate) {
-  // 因為 candidate 尚未加到 scene，先確保矩陣最新
   candidate.updateMatrixWorld(true);
   objects.push(candidate);
   const e = packingEnergy();
@@ -1347,93 +1168,14 @@ function packingEnergyWithCandidate(candidate) {
   return e;
 }
 
-/**
- * 先掃描容器可行位置，找出「能量最小」的位置（固定當前朝向），
- * 擺下去後再做最佳離散朝向（0/90/180/270）。
- */
-/* function placeInsideContainer(mesh) {
+  function placeInsideContainer(mesh) {
   const containerBox = new THREE.Box3().setFromObject(container);
   const box = new THREE.Box3().setFromObject(mesh);
   const size = new THREE.Vector3(); box.getSize(size);
 
   const padding = 0.03;
   const grid = mesh.userData?.unit || null;
-  const step = grid ? grid : Math.max(0.5, Math.min(size.x, size.z) / 4);
-  const snap = (v, g) => g ? Math.round(v / g) * g : v;
-
-  const leftX  = containerBox.min.x + size.x / 2 + padding;
-  const rightX = containerBox.max.x - size.x / 2 - padding;
-  const backZ  = containerBox.min.z + size.z / 2 + padding;
-  const frontZ = containerBox.max.z - size.z / 2 - padding;
-
-  // 先記下場景當前能量，作為 fallback
-  const baseEnergy = packingEnergy();
-
-  let best = null;
-
-  for (let x = leftX; x <= rightX + 1e-6; x += step) {
-    for (let z = backZ; z <= frontZ + 1e-6; z += step) {
-      // 設置候選位置（先 XZ，再用落地求 Y）
-      mesh.position.set(snap(x, grid), 0, snap(z, grid));
-      mesh.position.y = findRestingY(mesh);
-
-      // 邊界與重疊檢查
-      if (!isInsideContainerAABB(mesh)) continue;
-      if (isOverlapping(mesh)) continue;
-
-      // 能量評分（以空隙/破碎度為主）
-      const e = FAST_PACKING ? 0 : packingEnergyWithCandidate(mesh);
-
-      // tie-breaker：能量相同 → 更低y → 更靠左/後牆（更集中）
-      const b = new THREE.Box3().setFromObject(mesh);
-      const tie = (best && Math.abs(e - best.energy) < 1e-9);
-      if (!best || e < best.energy - 1e-9 ||
-          (tie && (b.min.y < best.boxMinY - 1e-6 ||
-                   (Math.abs(b.min.y - best.boxMinY) < 1e-6 &&
-                    (b.min.x + b.min.z) < (best.boxMinX + best.boxMinZ) - 1e-6)))) {
-        best = {
-          energy: e,
-          pos: mesh.position.clone(),
-          rot: mesh.rotation.clone(),
-          boxMinY: b.min.y,
-          boxMinX: b.min.x,
-          boxMinZ: b.min.z
-        };
-      }
-    }
-  }
-
-  if (!best) {
-    console.warn('⚠️ 容器已滿或找不到合法位置');
-    return false;
-  }
-
-  // 套用最佳位置（仍維持當前朝向）
-  mesh.position.copy(best.pos);
-  mesh.rotation.copy(best.rot);
-
-  // 正式加入場景與 objects
-  scene.add(mesh);
-  objects.push(mesh);
-
-  // 再進行「最佳離散朝向」並重新落地
-  tryBestAxisOrientation(mesh);
-  mesh.position.y = findRestingY(mesh);
-
-  // 最後收斂一下
-  globalCompaction(1);
-  return true;
-} */
-
-  // 🔧[重寫] 掃描位置 + 僅用(0/90/180/270)的 Y 朝向；更細步距；tie-break 靠角與低位
-function placeInsideContainer(mesh) {
-  const containerBox = new THREE.Box3().setFromObject(container);
-  const box = new THREE.Box3().setFromObject(mesh);
-  const size = new THREE.Vector3(); box.getSize(size);
-
-  const padding = 0.03;
-  const grid = mesh.userData?.unit || null;
-  const step = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);   // 🔧更細
+  const step = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
   const snap = (v, g) => g ? Math.round(v / g) * g : v;
 
   const leftX  = containerBox.min.x + size.x/2 + padding;
@@ -1446,7 +1188,7 @@ function placeInsideContainer(mesh) {
   for (let x = leftX; x <= rightX + 1e-6; x += step) {
     for (let z = backZ; z <= frontZ + 1e-6; z += step) {
       for (const ay of RIGHT_ANGLES) {
-        mesh.rotation.set(0, ay, 0);                     // 🔧 僅水平直角
+        mesh.rotation.set(0, ay, 0);
         mesh.position.set(snap(x, grid), 0, snap(z, grid));
         mesh.position.y = findRestingY(mesh);
 
@@ -1468,26 +1210,31 @@ function placeInsideContainer(mesh) {
     }
   }
 
-  if (!best) { console.warn('⚠️ 容器已滿或找不到合法位置'); return false; }
+  if (!best) {
+    console.warn('⚠️ 容器已滿或找不到合法位置');
+    return false;
+  }
 
   mesh.position.copy(best.pos);
   mesh.rotation.copy(best.rot);
 
+  if (isOverlapping(mesh)) {
+    console.warn('⚠️ 找到位置但與其他物體重疊，放置失敗');
+    return false;
+  }
+
   scene.add(mesh);
   objects.push(mesh);
 
-  // 🔧 最佳直角朝向 + 再落地
   tryBestAxisOrientation_Y(mesh);
   mesh.position.y = findRestingY(mesh);
-
-  globalCompaction(3);   // 🔧 更積極
-  shakeAndSettle();      // 🔧 新增 settle
-    // 視角跟隨：放置完成後，視角輕推到新物體
+  globalCompaction(3);
+  shakeAndSettle();
   nudgeViewDuringOptimization(mesh, 220);
+  renderVoidHUD();
   return true;
 }
 
-// 🔧[新增] 沿牆滑動 + 輕微隨機擾動 + 再落地，讓物體「吃縫」
 function shakeAndSettle(iter=2) {
   const step = 0.6;
   for (let t=0; t<iter; t++) {
@@ -1500,14 +1247,12 @@ function shakeAndSettle(iter=2) {
         moved = false;
         const old = o.position.clone();
 
-        // 向左與向後各滑一步
         o.position.x = THREE.MathUtils.clamp(o.position.x - step, b.minX, b.maxX);
         o.position.z = THREE.MathUtils.clamp(o.position.z - step, b.minZ, b.maxZ);
         o.position.y = findRestingY(o);
         if (isOverlapping(o,o)) o.position.copy(old);
         else if (o.position.distanceTo(old) > 1e-6) moved = true;
 
-        // 加一點點隨機抖動，讓卡住的邊縫被吃掉
         const keep = o.position.clone();
         const rx = (Math.random()-0.5)*step, rz = (Math.random()-0.5)*step;
         o.position.x = THREE.MathUtils.clamp(o.position.x + rx, b.minX, b.maxX);
@@ -1572,7 +1317,6 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
         } else {
             mesh = outer;
         }
-        // 讓碰撞系統知道這是球
     mesh.userData.isSphere = true;
     mesh.userData.sphereR  = Math.max(1, width * 0.5);
     mesh.userData.type     = 'custom';
@@ -1621,7 +1365,6 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
     }
     mesh.userData.type = 'custom';
     mesh.userData.originalY = mesh.position.y;
-    // 🔧[新增] 每放一個也做一次 settle
     shakeAndSettle();
 
 }
@@ -1735,6 +1478,7 @@ renderer.domElement.addEventListener('mouseup', () => {
             selectedObj.position.y = liftOutOfOverlap(selectedObj);
         }
     }
+    renderVoidHUD();
 });
 
 renderer.domElement.addEventListener('mousemove',(event) =>{
@@ -1892,10 +1636,10 @@ window.addEventListener('resize', () => {
 window.addEventListener('DOMContentLoaded', () => {
     updateParamVisibility();
     ensureSceneButtons();
+    renderVoidHUD();
 });
 
 (async () => {
-    // ✅ 先嘗試動態載入 OBB，失敗就用 fallback，不會黑畫面
     try { const mod = await import('three/examples/jsm/math/OBB.js'); OBBClass = mod.OBB; console.log('[OBB] loaded'); }
     catch (e) { console.warn('[OBB] not available, using fallback', e); }
     if (UNDER_AUTOMATION) { renderLibrary(); return; } 
