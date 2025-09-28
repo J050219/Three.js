@@ -1325,7 +1325,7 @@ function packingEnergyWithCandidate(candidate) {
   return e;
 }
 
-  function placeInsideContainer(mesh) {
+function placeInsideContainer(mesh) {
   const containerBox = new THREE.Box3().setFromObject(container);
   const box = new THREE.Box3().setFromObject(mesh);
   const size = new THREE.Vector3(); box.getSize(size);
@@ -1387,6 +1387,66 @@ function packingEnergyWithCandidate(candidate) {
   mesh.position.y = findRestingY(mesh);
   globalCompaction(3);
   shakeAndSettle();
+  nudgeViewDuringOptimization(mesh, 220);
+  renderVoidHUD();
+  return true;
+}
+
+// 將物體放到暫存區（紅框）內，避免重疊，優先左後角，支援 0/90/180/270° 朝向
+function placeInStaging(mesh) {
+  // 取尺寸 & 暫存區邊界
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const half = size.clone().multiplyScalar(0.5);
+
+  const bounds = getBoundsForArea('staging', half); // {minX,maxX,minZ,maxZ,minY,maxY,baseY}
+
+  const grid = mesh.userData?.unit || null;
+  const step = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
+  const snap = (v, g) => g ? Math.round(v / g) * g : v;
+
+  let placed = false;
+
+  // 由左→右、後→前掃描；每格試 4 個直角朝向
+  outer:
+  for (let z = bounds.minZ; z <= bounds.maxZ + 1e-6; z += step) {
+    for (let x = bounds.minX; x <= bounds.maxX + 1e-6; x += step) {
+      for (const ay of RIGHT_ANGLES) {
+        mesh.rotation.set(0, ay, 0);
+        mesh.position.set(snap(x, grid), 0, snap(z, grid));
+        mesh.position.y = findRestingYForArea(mesh, 'staging', half);
+
+        // AABB 是否完全在 staging 邊界內
+        const sb = new THREE.Box3().setFromObject(mesh);
+        const inside =
+          sb.min.x >= bounds.minX - 1e-3 && sb.max.x <= bounds.maxX + 1e-3 &&
+          sb.min.z >= bounds.minZ - 1e-3 && sb.max.z <= bounds.maxZ + 1e-3 &&
+          sb.min.y >= bounds.minY - 1e-3 && sb.max.y <= bounds.maxY + 1e-3;
+        if (!inside) continue;
+
+        // 不與現有 objects 碰撞
+        if (isOverlapping(mesh)) continue;
+
+        placed = true;
+        break outer;
+      }
+    }
+  }
+
+  // 找不到網格位：退而求其次，放在暫存區中心上方，再墜落
+  if (!placed) {
+    mesh.position.set(stagingPad.position.x, bounds.minY, stagingPad.position.z);
+    mesh.position.y = findRestingYForArea(mesh, 'staging', half);
+    if (isOverlapping(mesh)) {
+      console.warn('⚠️ 暫存區已滿或放置失敗');
+      return false;
+    }
+  }
+
+  scene.add(mesh);
+  objects.push(mesh);
+
+  // 小優化：視角帶到新物體；更新 HUD（藍色容器空隙）
   nudgeViewDuringOptimization(mesh, 220);
   renderVoidHUD();
   return true;
@@ -1517,13 +1577,18 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
     } else {
         mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
     }
-    if (!placeInsideContainer(mesh)) {
+    /* if (!placeInsideContainer(mesh)) {
         console.warn('⚠️ 容器已滿或放置失敗');
     }
     mesh.userData.type = 'custom';
     mesh.userData.originalY = mesh.position.y;
-    shakeAndSettle();
-
+    shakeAndSettle(); */
+    if (!placeInStaging(mesh)) {
+      console.warn('⚠️ 暫存區已滿或放置失敗');
+  }
+  mesh.userData.type = 'custom';
+  mesh.userData.originalY = mesh.position.y;
+  // ⚠️ 放在暫存區時不要做 container 的壓實/吃縫，避免被往藍色容器方向推
 }
 
 let isDragging = false;
