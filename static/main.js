@@ -677,7 +677,14 @@ const containerMaterial = new THREE.MeshStandardMaterial({
     side: THREE.DoubleSide
 });
 const container = new THREE.Mesh(containerGeometry, containerMaterial);
-container.position.y = 45;
+/* container.position.y = 45; */
+function centerContainerOnPallet() {
+  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+  const ch = containerGeometry.parameters.height;
+  // 讓容器「底部」剛好貼齊托盤上表面，因此中心在 palletTop + ch/2
+  container.position.set(0, palletTop + ch / 2, 0);
+}
+centerContainerOnPallet();
 const containerEdges = new THREE.LineSegments(
     new THREE.EdgesGeometry(containerGeometry),
     new THREE.LineBasicMaterial({ color: 0x00ffff })
@@ -685,16 +692,20 @@ const containerEdges = new THREE.LineSegments(
 container.add(containerEdges);
 scene.add(container);
 
-const stagingSize = 110;
+const stagingSize = 150;
 const stagingPad = new THREE.Mesh(new THREE.BoxGeometry(stagingSize, 8, stagingSize), new THREE.MeshBasicMaterial({ color: 0x777777 }));
 const containerWidth = containerGeometry.parameters.width;
 stagingPad.position.set(container.position.x + containerWidth / 2 + stagingSize / 2 + 20, -5, container.position.z);
 scene.add(stagingPad);
 
-const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 130, stagingSize);
+const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 180, stagingSize);
 const stageFrameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent : true, opacity : 0.15, side : THREE.DoubleSide });
 const stagingFrame = new THREE.Mesh(stageFrameGeo, stageFrameMat);
-stagingFrame.position.set(stagingPad.position.x, stagingPad.position.y + 60, stagingPad.position.z);
+stagingFrame.position.set(
+  stagingPad.position.x,
+  stagingPad.position.y + stagingPad.geometry.parameters.height/2 + stageFrameGeo.parameters.height/2, // ← 自動置中
+  stagingPad.position.z
+);
 stagingFrame.add(new THREE.LineSegments(
   new THREE.EdgesGeometry(stageFrameGeo),
   new THREE.LineBasicMaterial({ color: 0x00ffff })
@@ -925,7 +936,7 @@ function getBoundsForArea(area, half) {
         minZ: stagingPad.position.z - halfD + half.z,
         maxZ: stagingPad.position.z + halfD - half.z,
         minY: baseY + half.y,
-        maxY: baseY + 200 - half.y, 
+        maxY: baseY + stageFrameGeo.parameters.height - half.y,
         baseY
         };
     }
