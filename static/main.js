@@ -856,13 +856,21 @@ function _collectAABBs(root) {
     return boxes;
 }
 
+// 取得某物體目前所屬的區域（container / staging）
+function areaOf(o){
+  return getAreaByXZ(o.position.x, o.position.z) || 'container';
+}
+
 function isOverlapping(ncandidate, ignore = null, eps = 1e-3) {
   const candMeshes = [];
   ncandidate.updateMatrixWorld(true);
   ncandidate.traverse(n => { if (n.isMesh) candMeshes.push(n); });
 
+  // 只檢查與「同區域」的物體（暫存區只跟暫存區比，容器只跟容器比）
+  const sameArea = areaOf(ncandidate);
   for (const obj of objects) {
     if (obj === ignore) continue;
+    if (areaOf(obj) !== sameArea) continue;  // ★ 關鍵：跨區域不檢查
 
     const otherMeshes = [];
     obj.updateMatrixWorld(true);
@@ -872,8 +880,8 @@ function isOverlapping(ncandidate, ignore = null, eps = 1e-3) {
       for (const om of otherMeshes) {
         const a = new THREE.Box3().setFromObject(cm);
         const b = new THREE.Box3().setFromObject(om);
-        if (!a.intersectsBox(b)) continue;  
-        if (meshesReallyIntersect(cm, om)) return true; 
+        if (!a.intersectsBox(b)) continue;
+        if (meshesReallyIntersect(cm, om)) return true;
       }
     }
   }
@@ -1238,6 +1246,95 @@ function globalCompaction(passes = 3) {
   }
 }
 
+function ensureInScene(o){
+  if (!o.parent) scene.add(o);
+  if (!objects.includes(o)) objects.push(o);
+}
+
+function rescueToStaging(mesh){
+  try{
+    // 優先用演算法塞暫存區；保底直接丟到中心上方
+    if (!placeInStaging(mesh)) {
+      const b = getBoundsForArea('staging', new THREE.Vector3(1,1,1));
+      mesh.position.set(stagingPad.position.x, b.minY, stagingPad.position.z);
+      ensureInScene(mesh);
+    }
+  } catch(e){
+    console.warn('rescueToStaging 失敗', e);
+    ensureInScene(mesh);
+  }
+}
+
+function resetPose(mesh) {
+  mesh.rotation.set(0, 0, 0);
+  mesh.position.set(0, 0, 0);
+  mesh.updateMatrixWorld(true);
+}
+
+function dedupeObjects() {
+  const seen = new Set();
+  for (let i = objects.length - 1; i >= 0; i--) {
+    const o = objects[i];
+    if (seen.has(o)) objects.splice(i, 1);
+    else seen.add(o);
+  }
+}
+
+// 在 autoPackMaxUtilization 開頭加：
+dedupeObjects();
+
+async function autoPackMaxUtilization(options = {}) {
+  if (annealRunning) { uiToast('請先停止正在進行的最佳化'); return; }
+
+  for (const o of objects) { 
+    o.visible = true; 
+    ensureInScene(o);
+  }
+  const bigRatio    = options.bigRatio   ?? 0.6;   // 前 60% 體積視為大件
+  const fineFactor  = options.fineFactor ?? 0.5;   // 小件步距縮小到 50%
+  const ultraFactor = options.ultraFactor?? 0.33;  // 再更細一輪
+  uiToast('開始最大化擺放（先大後小）');
+
+  // 依「真實體積」由大到小排序（不移除場景）
+  const ranked = objects.slice()
+    .map(o => ({ o, vol: worldVolumeOfObject(o) }))
+    .sort((a,b)=> b.vol - a.vol)
+    .map(x=>x.o);
+
+  const cut   = Math.max(1, Math.round(ranked.length * bigRatio));
+  const big   = ranked.slice(0, cut);
+  const small = ranked.slice(cut);
+
+  // === 大物件：快速放進藍色容器（速度優先，不計能量） ===
+  FAST_PACKING = true;
+  for (const m of big) {
+    resetPose(m);
+    /* ensureInScene(m); */ // 先確保存在 scene/objects
+    const ok = placeInsideContainer(m, { stepScale: 1.0, padding: 0.05, angles: RIGHT_ANGLES });
+    if (!ok) rescueToStaging(m);
+    await uiYield();
+  }
+
+  // === 小物件：細掃描 + 能量評分，填縫 ===
+  FAST_PACKING = false;
+  for (const m of small) {
+    resetPose(m);
+    /* ensureInScene(m); */
+    let ok = placeInsideContainer(m, { stepScale: fineFactor,  padding: 0.02, angles: RIGHT_ANGLES });
+    if (!ok) ok = placeInsideContainer(m, { stepScale: ultraFactor, padding: 0.02, angles: RIGHT_ANGLES });
+    if (!ok) rescueToStaging(m);
+    await uiYield();
+  }
+
+  // 壓實 + 退火
+  globalCompaction(2);
+  await runAnnealing({ steps: options.steps ?? 9000, initTemp: 90, cooling: 0.997, baseStep: 3, baseAngle: Math.PI/18 });
+
+  const r = measureBlueVoidFast();
+  uiToast(`完成：利用率 ${(100 - r.emptyRatio * 100).toFixed(1)}%`);
+  renderVoidHUD();
+}
+
 let annealRunning = false;
 
 async function runAnnealing(opts = {}) {
@@ -1300,8 +1397,8 @@ async function runAnnealing(opts = {}) {
 }
 
 document.getElementById('optimizeBtn')?.addEventListener('click', () => {
-    runAnnealing({ steps: 8000, initTemp: 120, cooling: 0.996, baseStep: 5, baseAngle: Math.PI/12 });
-});
+    autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.5, ultraFactor: 0.33, steps: 9000 });
+}); 
 
 document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => {
     annealRunning = false;
@@ -1336,14 +1433,18 @@ function packingEnergyWithCandidate(candidate) {
   return e;
 }
 
-function placeInsideContainer(mesh) {
+function placeInsideContainer(mesh, opts = {}) {
   const containerBox = new THREE.Box3().setFromObject(container);
   const box = new THREE.Box3().setFromObject(mesh);
   const size = new THREE.Vector3(); box.getSize(size);
 
-  const padding = 0.03;
+  const padding = (opts.padding ?? 0.03);
+  const angles  = opts.angles  ?? RIGHT_ANGLES;
+
   const grid = mesh.userData?.unit || null;
-  const step = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
+  const stepBase = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
+  const step = Math.max(0.15, stepBase * (opts.stepScale ?? 1.0)); // ← 支援細掃描
+
   const snap = (v, g) => g ? Math.round(v / g) * g : v;
 
   const leftX  = containerBox.min.x + size.x/2 + padding;
@@ -1355,13 +1456,15 @@ function placeInsideContainer(mesh) {
 
   for (let x = leftX; x <= rightX + 1e-6; x += step) {
     for (let z = backZ; z <= frontZ + 1e-6; z += step) {
-      for (const ay of RIGHT_ANGLES) {
+      for (const ay of angles) {
         mesh.rotation.set(0, ay, 0);
         mesh.position.set(snap(x, grid), 0, snap(z, grid));
         mesh.position.y = findRestingY(mesh);
 
         if (!isInsideContainerAABB(mesh)) continue;
-        if (isOverlapping(mesh)) continue;
+        /* if (isOverlapping(mesh)) continue; */
+        if (isOverlapping(mesh, mesh)) continue;   // ✅ 忽略自己
+
 
         const e = FAST_PACKING ? 0 : packingEnergyWithCandidate(mesh);
         const b = new THREE.Box3().setFromObject(mesh);
@@ -1378,18 +1481,11 @@ function placeInsideContainer(mesh) {
     }
   }
 
-  if (!best) {
-    console.warn('⚠️ 容器已滿或找不到合法位置');
-    return false;
-  }
+  if (!best) return false;
 
   mesh.position.copy(best.pos);
   mesh.rotation.copy(best.rot);
-
-  if (isOverlapping(mesh)) {
-    console.warn('⚠️ 找到位置但與其他物體重疊，放置失敗');
-    return false;
-  }
+  if (isOverlapping(mesh)) return false;
 
   scene.add(mesh);
   objects.push(mesh);
@@ -1436,7 +1532,9 @@ function placeInStaging(mesh) {
         if (!inside) continue;
 
         // 不與現有 objects 碰撞
-        if (isOverlapping(mesh)) continue;
+        /* if (isOverlapping(mesh)) continue; */
+        if (isOverlapping(mesh, mesh)) continue;   // ✅ 忽略自己
+
 
         placed = true;
         break outer;
@@ -1444,18 +1542,23 @@ function placeInStaging(mesh) {
     }
   }
 
-  // 找不到網格位：退而求其次，放在暫存區中心上方，再墜落
-  if (!placed) {
-    mesh.position.set(stagingPad.position.x, bounds.minY, stagingPad.position.z);
-    mesh.position.y = findRestingYForArea(mesh, 'staging', half);
-    if (isOverlapping(mesh)) {
-      console.warn('⚠️ 暫存區已滿或放置失敗');
-      return false;
-    }
-  }
+ // 找不到網格位：退而求其次，放在暫存區中心上方，再墜落
+if (!placed) {
+  mesh.position.set(stagingPad.position.x, bounds.minY, stagingPad.position.z);
+  mesh.position.y = findRestingYForArea(mesh, 'staging', half);
 
-  scene.add(mesh);
-  objects.push(mesh);
+  if (isOverlapping(mesh)) {
+    console.warn('⚠️ 暫存區已滿或放置失敗（避免重疊）');
+    return false;
+  }
+}
+
+
+  /* scene.add(mesh);
+  objects.push(mesh); */
+  if (!mesh.parent) scene.add(mesh);
+  if (!objects.includes(mesh)) objects.push(mesh);   // ✅ 不重複加入
+
 
   // 小優化：視角帶到新物體；更新 HUD（藍色容器空隙）
   nudgeViewDuringOptimization(mesh, 220);
@@ -1745,16 +1848,27 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
                 currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
             }
         }
-    } else {
-        const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
-        const targetBox = new THREE.Box3().setFromObject(currentTarget);
-        const targetSize = new THREE.Vector3(); targetBox.getSize(targetSize);
-        const halfSize = targetSize.clone().multiplyScalar(0.5);
-        const b = getBoundsForArea(area, halfSize);
-        const dy = (lastMouseY - event.clientY) * 0.1;
-        let newY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
-        currentTarget.position.y = newY;
-        lastMouseY = event.clientY;
+      } else {
+      // spaceDown === true ：垂直拖曳
+      const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+      const targetBox = new THREE.Box3().setFromObject(currentTarget);
+      const targetSize = new THREE.Vector3(); targetBox.getSize(targetSize);
+      const halfSize = targetSize.clone().multiplyScalar(0.5);
+      const b = getBoundsForArea(area, halfSize);
+
+      const dy = (lastMouseY - event.clientY) * 0.1;
+      let tryY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
+
+      // ★ 檢查：垂直位移也不能重疊
+      const probe = currentTarget.clone();
+      probe.position.set(currentTarget.position.x, tryY, currentTarget.position.z);
+      if (!isOverlapping(probe, currentTarget)) {
+        currentTarget.position.y = tryY;
+      } else {
+        // 若會重疊，往上提到剛好不重疊
+        currentTarget.position.y = liftOutOfOverlap(currentTarget);
+      }
+      lastMouseY = event.clientY;
     }
 });
 
@@ -1871,6 +1985,52 @@ window.addEventListener('DOMContentLoaded', () => {
     ensureSceneButtons();
     renderVoidHUD();
 });
+
+// ---- 讓動畫不阻塞 UI（若你還沒定義它）
+async function uiYield() { return new Promise(r => requestAnimationFrame(() => r())); }
+
+// ---- 點擊行為（統一入口）：有 autoPackMaxUtilization 就用它，否則就跑 runAnnealing
+async function onOptimizeClick(e){
+  e?.preventDefault?.();
+  try{
+    console.log('[OPT] click', { objects: objects.length, annealRunning });
+    if (annealRunning) { uiToast?.('最佳化已在進行中'); return; }
+    if (!objects?.length) { uiToast?.('目前沒有物體可最佳化'); return; }
+
+    if (typeof autoPackMaxUtilization === 'function') {
+      await autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.5, ultraFactor: 0.33, steps: 9000 });
+    } else if (typeof runAnnealing === 'function') {
+      await runAnnealing({ steps: 8000, initTemp: 120, cooling: 0.996, baseStep: 5, baseAngle: Math.PI/12 });
+    } else {
+      console.error('[OPT] 找不到最佳化函式');
+      uiToast?.('找不到最佳化函式');
+    }
+  } catch (err) {
+    console.error('[OPT] 執行錯誤', err);
+    uiToast?.('最佳化發生錯誤（詳見 console）');
+  }
+}
+
+function bindOptimizeButtons(){
+  const btn  = document.getElementById('optimizeBtn');
+  const stop = document.getElementById('stopOptimizeBtn');
+  if (!btn) { console.warn('[OPT] 找不到 #optimizeBtn'); return; }
+
+  btn.addEventListener('click', onOptimizeClick);
+  stop?.addEventListener('click', () => {
+    annealRunning = false;
+    try { ConvergenceChart?.stop?.(); } catch {}
+    uiToast?.('已停止最佳化');
+  });
+  console.log('[OPT] 按鈕事件已綁定');
+}
+
+// 無論腳本早或晚載，都會綁到
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', bindOptimizeButtons, { once:true });
+} else {
+  bindOptimizeButtons();
+}
 
 (async () => {
     try { const mod = await import('three/examples/jsm/math/OBB.js'); OBBClass = mod.OBB; console.log('[OBB] loaded'); }
