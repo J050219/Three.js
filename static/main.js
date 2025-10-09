@@ -692,13 +692,13 @@ const containerEdges = new THREE.LineSegments(
 container.add(containerEdges);
 scene.add(container);
 
-const stagingSize = 150;
+const stagingSize = 220;
 const stagingPad = new THREE.Mesh(new THREE.BoxGeometry(stagingSize, 8, stagingSize), new THREE.MeshBasicMaterial({ color: 0x777777 }));
 const containerWidth = containerGeometry.parameters.width;
 stagingPad.position.set(container.position.x + containerWidth / 2 + stagingSize / 2 + 20, -5, container.position.z);
 scene.add(stagingPad);
 
-const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 180, stagingSize);
+const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 220, stagingSize);
 const stageFrameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent : true, opacity : 0.15, side : THREE.DoubleSide });
 const stagingFrame = new THREE.Mesh(stageFrameGeo, stageFrameMat);
 stagingFrame.position.set(
@@ -1396,9 +1396,14 @@ async function runAnnealing(opts = {}) {
     annealRunning = false;
 }
 
-document.getElementById('optimizeBtn')?.addEventListener('click', () => {
+/* document.getElementById('optimizeBtn')?.addEventListener('click', () => {
     autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.5, ultraFactor: 0.33, steps: 9000 });
-}); 
+});  */
+// 原本：autoPackMaxUtilization(...)
+document.getElementById('optimizeBtn')?.addEventListener('click', () => {
+  packToTheMax();   // ← 改成這個
+});
+
 
 document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => {
     annealRunning = false;
@@ -1703,6 +1708,22 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
   mesh.userData.type = 'custom';
   mesh.userData.originalY = mesh.position.y;
   // ⚠️ 放在暫存區時不要做 container 的壓實/吃縫，避免被往藍色容器方向推
+  // 先重置姿勢，避免舊姿勢不利於放入
+mesh.rotation.set(0, 0, 0);
+mesh.position.set(0, 0, 0);
+mesh.updateMatrixWorld(true);
+
+// 先粗掃 + 細掃嘗試放入容器
+let placed = placeInsideContainer(mesh, { stepScale: 1.0,  padding: 0.04 })
+          || placeInsideContainer(mesh, { stepScale: 0.55,  padding: 0.02 })
+          || placeInsideContainer(mesh, { stepScale: 0.33,  padding: 0.02 });
+
+if (!placed) {
+  // 還是進不去：放暫存區（不與他物重疊）
+  if (!placeInStaging(mesh)) {
+    console.warn('⚠️ 暫存區已滿或放置失敗');
+  }
+}
 }
 
 let isDragging = false;
@@ -2009,6 +2030,54 @@ async function onOptimizeClick(e){
     console.error('[OPT] 執行錯誤', err);
     uiToast?.('最佳化發生錯誤（詳見 console）');
   }
+}
+
+// ====== 塞到最滿：一鍵流程 ======
+async function packToTheMax() {
+  if (annealRunning) { uiToast('請先停止正在進行的最佳化'); return; }
+  if (!objects.length) { uiToast('目前沒有物體'); return; }
+
+  // 🔧 提升體素精度（能量評分更準）
+  const oldVOX = VOXEL_RES;
+  window.VOXEL_RES = 18;   // 原本 12，提到 18（可視效能調整 16~24）
+
+  // (A) 先大後小：和你現有的流程一致，但我們多試一次「更細步距」
+  await autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.45, ultraFactor: 0.28, steps: 11000 });
+
+  // (B) 把暫存區仍未入箱的物件再試一次
+  const staged = objects.filter(o => (getAreaByXZ(o.position.x, o.position.z) === 'staging'));
+  if (staged.length) uiToast(`再嘗試塞入剩餘 ${staged.length} 件`);
+  for (const m of staged) {
+    // 重置姿態，三段細掃（更細）
+    resetPose(m);
+    let ok = placeInsideContainer(m, { stepScale: 0.55, padding: 0.02 })
+          || placeInsideContainer(m, { stepScale: 0.33, padding: 0.02 })
+          || placeInsideContainer(m, { stepScale: 0.22, padding: 0.015 });
+    if (!ok) {
+      // 仍不行就維持在暫存區
+      placeInStaging(m);
+    }
+    await uiYield();
+  }
+
+  // (C) 強化壓實 + 微擾「封箱」讓邊角更貼齊
+  globalCompaction(3);
+  shakeAndSettle(3);
+
+  // 針對每個物件試四個直角朝向取最小能量（快速版本）
+  for (const o of objects) { tryBestAxisOrientation_Y(o); o.position.y = findRestingY(o); }
+
+  // 再跑一小輪退火 + 輕壓實
+  await runAnnealing({ steps: 6000, initTemp: 80, cooling: 0.998, baseStep: 2, baseAngle: Math.PI/18 });
+  globalCompaction(2);
+
+  // (D) 顯示成果
+  const r = measureBlueVoidFast();
+  uiToast(`完成：容積利用率 ${(100 - r.emptyRatio*100).toFixed(1)}%`);
+  renderVoidHUD();
+
+  // 還原 VOXEL_RES 避免之後太吃效能（可依需要保留高精度）
+  window.VOXEL_RES = oldVOX;
 }
 
 function bindOptimizeButtons(){
