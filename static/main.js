@@ -141,13 +141,13 @@ function ensureVoidHUD() {
 
 function renderVoidHUD() {
   const hud = ensureVoidHUD();
-  const r = measureBlueVoidFast();
+  const r = measureBlueVoid();
   hud.textContent =
     `空隙 ${ (r.emptyRatio*100).toFixed(1) }%  ` ;
 }
 
 function showVoidStats() {
-  const r = measureBlueVoidFast();
+  const r = measureBlueVoid();
   const msg = `空隙 ${(r.emptyRatio*100).toFixed(1)}% `;
   console.log('[Blue-Container Void]', r, msg);
   if (typeof uiToast === 'function') uiToast(msg, 2200);
@@ -160,7 +160,7 @@ function getInteriorBox() {
   return new THREE.Box3().setFromObject(interior);
 }
 
-function measureBlueVoidFast() {
+/* function measureBlueVoidFast() {
   const interiorBox = getInteriorBox();
   if (!interiorBox) return { emptyVolume:0, emptyRatio:0, containerVolume:0, solidVolume:0 };
 
@@ -194,7 +194,197 @@ function measureBlueVoidFast() {
   const emptyVolume = Math.max(0, containerVolume - solidVolume);
   const emptyRatio  = containerVolume > 0 ? emptyVolume / containerVolume : 0;
   return { emptyVolume, emptyRatio, containerVolume, solidVolume };
+} */
+
+  // ===== 精準空隙估算：優先 CSG，失敗回退 Voxel + 射線點內測試 =====
+// ===== 精準空隙估算：優先 CSG，失敗回退 Voxel + 射線點內測試 =====
+const VOID_VOXEL_RES   = 26;   // 回退取樣解析度（邊長格數），可視效能 18~36
+const VOID_MC_SAMPLES  = 0;    // 若想用隨機取樣，可設 >0，例如 40000；預設用規則格點
+const CSG_MAX_BATCH    = 12;   // 一次 union 的批量，避免 CSG 爆炸
+const USE_ONLY_CONTAINER = true; // 只統計藍色容器內（忽略 staging）
+
+function _interiorMeshSolid() {
+  const cb = new THREE.Box3().setFromObject(container);
+  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+  const w = cb.max.x - cb.min.x, h = cb.max.y - palletTop, d = cb.max.z - cb.min.z;
+  if (h <= 0) return null;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial());
+  m.position.set((cb.min.x + cb.max.x)/2, palletTop + h/2, (cb.min.z + cb.max.z)/2);
+  m.updateMatrixWorld(true);
+  return m;
 }
+
+// 把一個「物件」裁切到容器內部；回傳可做 CSG 的 mesh（可能為 null）
+function _clipToInteriorCSG(obj, interiorMesh) {
+  try {
+    const a = new THREE.Box3().setFromObject(obj);
+    const b = new THREE.Box3().setFromObject(interiorMesh);
+    if (!a.intersectsBox(b)) return null;
+
+    const parts = [];
+    obj.updateMatrixWorld(true);
+    obj.traverse(n => {
+      if (n.isMesh && n.geometry) parts.push(toCSGReady(n));
+    });
+    if (!parts.length) return null;
+
+    let acc = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      try { acc = CSG.union(acc, parts[i]); } catch {}
+    }
+
+    const clipped = CSG.intersect(acc, toCSGReady(interiorMesh));
+    clipped.updateMatrixWorld(true);
+    return clipped;
+  } catch { return null; }
+}
+
+// 將多個 mesh 做批次 union（避免一次 union 太多導致失敗）
+function _batchUnion(meshes) {
+  if (!meshes.length) return null;
+  let current = meshes[0];
+  for (let i = 1; i < meshes.length; i++) {
+    try {
+      current = CSG.union(current, meshes[i]);
+    } catch {
+      const batch = [];
+      for (let k = i; k < Math.min(meshes.length, i + CSG_MAX_BATCH); k++) batch.push(meshes[k]);
+      try {
+        let bacc = batch[0];
+        for (let t = 1; t < batch.length; t++) bacc = CSG.union(bacc, batch[t]);
+        current = CSG.union(current, bacc);
+        i += (batch.length - 1);
+      } catch {}
+    }
+  }
+  current.updateMatrixWorld(true);
+  return current;
+}
+
+// CSG 路徑：盡量精準的體積（含鑽孔、切邊）
+function _solidVolumeViaCSG() {
+  const interior = _interiorMeshSolid();
+  if (!interior) return null;
+
+  const inside = [];
+  for (const o of objects) {
+    if (USE_ONLY_CONTAINER && areaOf(o) !== 'container') continue;
+    const clipped = _clipToInteriorCSG(o, interior);
+    if (clipped) inside.push(clipped);
+  }
+  const containerVol = _meshWorldVolume(toCSGReady(interior));
+  if (!inside.length) return { containerVolume: containerVol, solidVolume: 0 };
+
+  const merged = _batchUnion(inside);
+  if (!merged) return null;
+
+  const solid = _meshWorldVolume(merged);
+  return { containerVolume: containerVol, solidVolume: Math.max(0, Math.min(solid, containerVol)) };
+}
+
+// Voxel/蒙地卡羅回退：射線點內測試 + 球體快速測試
+function _pointInsideAnyObject(p, rayDir = new THREE.Vector3(1,0,0)) {
+  const candidates = USE_ONLY_CONTAINER ? objects.filter(o => areaOf(o) === 'container') : objects;
+
+  // 球體快測
+  for (const o of candidates) {
+    if (o.userData?.isSphere) {
+      const { center, r } = getWorldSphereFromMesh(o);
+      if (center.distanceToSquared(p) <= r*r) return true;
+    }
+  }
+
+  // 射線 parity 測試
+  _collideRaycaster.set(p, rayDir);
+  let hitCount = 0;
+  for (const o of candidates) {
+    const hits = _collideRaycaster.intersectObject(o, true);
+    if (hits.length) {
+      const n = hits.filter(h => h.distance > 1e-6).length;
+      hitCount += n;
+    }
+  }
+  return (hitCount % 2) === 1;
+}
+
+function _solidVolumeViaVoxel() {
+  const interior = _interiorMeshSolid();
+  if (!interior) return null;
+  const ibox = new THREE.Box3().setFromObject(interior);
+
+  const volContainer =
+    (ibox.max.x - ibox.min.x) * (ibox.max.y - ibox.min.y) * (ibox.max.z - ibox.min.z);
+
+  const nx = VOID_VOXEL_RES, ny = VOID_VOXEL_RES, nz = VOID_VOXEL_RES;
+  const dx = (ibox.max.x - ibox.min.x) / nx;
+  const dy = (ibox.max.y - ibox.min.y) / ny;
+  const dz = (ibox.max.z - ibox.min.z) / nz;
+
+  let insideCount = 0, total = nx * ny * nz;
+  const p = new THREE.Vector3();
+  const ray = new THREE.Vector3(1,0,0);
+
+  if (VOID_MC_SAMPLES > 0) {
+    total = VOID_MC_SAMPLES;
+    for (let s = 0; s < VOID_MC_SAMPLES; s++) {
+      p.set(
+        THREE.MathUtils.lerp(ibox.min.x, ibox.max.x, Math.random()),
+        THREE.MathUtils.lerp(ibox.min.y, ibox.max.y, Math.random()),
+        THREE.MathUtils.lerp(ibox.min.z, ibox.max.z, Math.random())
+      );
+      if (_pointInsideAnyObject(p, ray)) insideCount++;
+    }
+  } else {
+    for (let j = 0; j < ny; j++) {
+      const y = ibox.min.y + (j + 0.5) * dy;
+      for (let k = 0; k < nz; k++) {
+        const z = ibox.min.z + (k + 0.5) * dz;
+        for (let i = 0; i < nx; i++) {
+          const x = ibox.min.x + (i + 0.5) * dx;
+          p.set(x, y, z);
+          if (_pointInsideAnyObject(p, ray)) insideCount++;
+        }
+      }
+    }
+  }
+
+  const solidRatio = insideCount / total;
+  const solidVol   = volContainer * solidRatio;
+  return { containerVolume: volContainer, solidVolume: solidVol };
+}
+
+// 對外：新的空隙估算（只算藍色容器內、排除紅色暫存區）
+function measureBlueVoid() {
+  // 1) 優先用 CSG 幾何體積（最準）
+  try {
+    const r = _solidVolumeViaCSG();
+    if (r) {
+      const empty = Math.max(0, r.containerVolume - r.solidVolume);
+      return {
+        emptyVolume: empty,
+        emptyRatio:  r.containerVolume > 0 ? empty / r.containerVolume : 0,
+        containerVolume: r.containerVolume,
+        solidVolume: r.solidVolume
+      };
+    }
+  } catch {}
+
+  // 2) 回退：Voxel/蒙地卡羅 + 射線點內測試
+  const v = _solidVolumeViaVoxel();
+  if (v) {
+    const empty = Math.max(0, v.containerVolume - v.solidVolume);
+    return {
+      emptyVolume: empty,
+      emptyRatio:  v.containerVolume > 0 ? empty / v.containerVolume : 0,
+      containerVolume: v.containerVolume,
+      solidVolume: v.solidVolume
+    };
+  }
+
+  // 3) 萬一都失敗：回傳 0
+  return { emptyVolume:0, emptyRatio:0, containerVolume:0, solidVolume:0 };
+}
+
 
 /* ===================== 收斂曲線 (右上角) ===================== */
 const ConvergenceChart = (() => {
@@ -248,7 +438,7 @@ const ConvergenceChart = (() => {
   }
 
   function pushPoint() {
-    const r = measureBlueVoidFast();                 // 直接用你已有的估算
+    const r = measureBlueVoid();                 // 直接用你已有的估算
     const y = Math.max(0, Math.min(100, r.emptyRatio * 100));
     const t = (performance.now() - S.start) / 1000;  // 秒
     S.data.push({ t, y });
@@ -1330,7 +1520,7 @@ async function autoPackMaxUtilization(options = {}) {
   globalCompaction(2);
   await runAnnealing({ steps: options.steps ?? 9000, initTemp: 90, cooling: 0.997, baseStep: 3, baseAngle: Math.PI/18 });
 
-  const r = measureBlueVoidFast();
+  const r = measureBlueVoid();
   uiToast(`完成：利用率 ${(100 - r.emptyRatio * 100).toFixed(1)}%`);
   renderVoidHUD();
 }
@@ -2072,7 +2262,7 @@ async function packToTheMax() {
   globalCompaction(2);
 
   // (D) 顯示成果
-  const r = measureBlueVoidFast();
+  const r = measureBlueVoid();
   uiToast(`完成：容積利用率 ${(100 - r.emptyRatio*100).toFixed(1)}%`);
   renderVoidHUD();
 
