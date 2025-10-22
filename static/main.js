@@ -4,6 +4,98 @@ import * as ThreeCSG from 'three-csg-ts';
 import { createRecognizer } from './recognizer.js';
 import * as TWEEN from '@tweenjs/tween.js';
 
+// === 🔹 新增全域記錄 ===
+let placementTimeline = []; // 儲存每步快照
+let playingTimeline = false;
+
+// === 🔹 新增：真實幾何體積計算（使用 CSG 精算） ===
+function measureTrueVolumeCSG(obj) {
+  try {
+    const geom = obj.geometry.clone();
+    geom.applyMatrix4(obj.matrixWorld);
+    let mesh = new THREE.Mesh(geom);
+    const csg = ThreeCSG.fromMesh(mesh);
+    const vol = csg.calcVolume();
+    return Math.abs(vol);
+  } catch {
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    return size.x * size.y * size.z;
+  }
+}
+
+function computePackingEfficiencyCSG(containerBox) {
+  const box = containerBox.clone();
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const containerVol = size.x * size.y * size.z;
+  let totalVol = 0;
+  for (const o of objects) totalVol += measureTrueVolumeCSG(o);
+  const eff = Math.min((totalVol / containerVol) * 100, 99.9);
+  return eff;
+}
+
+// === 🔹 Loading 轉圈提示 ===
+function showLoadingSpinner(show = true) {
+  let spinner = document.getElementById('loadingSpinner');
+  if (!spinner) {
+    spinner = document.createElement('div');
+    spinner.id = 'loadingSpinner';
+    Object.assign(spinner.style, {
+      position: 'fixed',
+      left: '50%',
+      top: '50%',
+      transform: 'translate(-50%, -50%)',
+      width: '60px',
+      height: '60px',
+      border: '6px solid rgba(255,255,255,0.3)',
+      borderTop: '6px solid #00ffff',
+      borderRadius: '50%',
+      animation: 'spin 1s linear infinite',
+      zIndex: 9999
+    });
+    const style = document.createElement('style');
+    style.innerHTML = `@keyframes spin {
+      from { transform: translate(-50%,-50%) rotate(0deg); }
+      to { transform: translate(-50%,-50%) rotate(360deg); }
+    }`;
+    document.head.appendChild(style);
+    document.body.appendChild(spinner);
+  }
+  spinner.style.display = show ? 'block' : 'none';
+}
+
+// === 🔹 播放擺放過程 ===
+async function playPlacementTimeline() {
+  if (placementTimeline.length === 0 || playingTimeline) return;
+  playingTimeline = true;
+  uiToast('正在播放擺放過程...');
+  for (const frame of placementTimeline) {
+    for (const f of frame) {
+      const obj = objects.find(o => o.uuid === f.id);
+      if (obj) {
+        obj.position.copy(f.pos);
+        obj.rotation.copy(f.rot);
+      }
+    }
+    renderer.render(scene, camera);
+    await new Promise(r => setTimeout(r, 25)); // 流暢播放
+  }
+  uiToast('播放完成');
+  playingTimeline = false;
+
+  // ✅ 釋放記憶體避免卡頓
+  for (const frame of placementTimeline) {
+    for (const f of frame) {
+      f.pos = null;
+      f.rot = null;
+    }
+  }
+  placementTimeline.length = 0;
+}
+
+
 // ✅ OBB 以動態載入，失敗則為 null（會自動用 fallback 撞檢）
 let OBBClass = null;
 const HAS_OBB = () => !!OBBClass;
@@ -1458,6 +1550,62 @@ function ensureInScene(o){
   if (!objects.includes(o)) objects.push(o);
 }
 
+// === 🔹 小畫面 UI（最佳化進行中） ===
+function ensureOptimizePanel() {
+  let p = document.getElementById('optimizePanel');
+  if (p) return p;
+
+  p = document.createElement('div');
+  p.id = 'optimizePanel';
+  Object.assign(p.style, {
+    position: 'fixed', left: '12px', top: '12px',
+    width: '260px', background: 'rgba(0,0,0,.65)',
+    color: '#fff', padding: '10px 12px', borderRadius: '10px',
+    fontFamily: 'system-ui, sans-serif', zIndex: 9999, display: 'none'
+  });
+
+  p.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;">
+      <div id="optSpin" style="
+        width:16px;height:16px;border:3px solid rgba(255,255,255,.25);
+        border-top-color:#00ffff;border-radius:50%;
+        animation: optspin 0.8s linear infinite;"></div>
+      <div style="font-weight:600;">最佳化擺放中</div>
+      <button id="optStopBtn" style="
+        margin-left:auto;background:#ff5a5a;border:none;color:#fff;
+        border-radius:6px;padding:4px 8px;cursor:pointer;">停止</button>
+    </div>
+    <div id="optSub" style="opacity:.85;font-size:12px;margin-top:6px;">初始化…</div>
+    <div style="margin-top:8px;height:6px;background:rgba(255,255,255,.15);border-radius:4px;">
+      <div id="optBar" style="height:6px;width:0%;background:#00ffff;border-radius:4px;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;opacity:.9;margin-top:6px;font-size:12px;">
+      <span id="optStep">0 / 0</span>
+      <span id="optVoid">空隙 0.0%</span>
+    </div>
+  `;
+  const style = document.createElement('style');
+  style.textContent = `@keyframes optspin {from{transform:rotate(0)}to{transform:rotate(360deg)}}`;
+  document.head.appendChild(style);
+  document.body.appendChild(p);
+
+  document.getElementById('optStopBtn').addEventListener('click', () => stopAnnealing());
+  return p;
+}
+function showOptimizePanel(show=true){ const p = ensureOptimizePanel(); p.style.display = show?'block':'none'; }
+function updateOptimizePanel({step=0,total=0,subtitle='',emptyPct=null} = {}) {
+  ensureOptimizePanel();
+  if (subtitle) document.getElementById('optSub').textContent = subtitle;
+  if (total > 0) {
+    const pct = Math.max(0, Math.min(100, (step/total)*100));
+    document.getElementById('optBar').style.width = pct + '%';
+    document.getElementById('optStep').textContent = `${step} / ${total}`;
+  }
+  if (emptyPct != null) {
+    document.getElementById('optVoid').textContent = `空隙 ${emptyPct.toFixed(1)}%`;
+  }
+}
+
 function rescueToStaging(mesh){
   try{
     // 優先用演算法塞暫存區；保底直接丟到中心上方
@@ -1544,65 +1692,247 @@ async function autoPackMaxUtilization(options = {}) {
 
 let annealRunning = false;
 
-async function runAnnealing(opts = {}) {
-    if (objects.length === 0) { uiToast('目前沒有物體可最佳化'); return; }
-    if (annealRunning) { uiToast('最佳化已在進行中'); return; }
+// === 🔹 最佳化流程（整合修正版） ===
+/* async function runAnnealing(opts = {}) {
+  if (objects.length === 0) { uiToast('目前沒有物體可最佳化'); return; }
+  if (annealRunning) { uiToast('最佳化已在進行中'); return; }
 
-    const steps    = opts.steps    ?? 10000;
-    const initTemp = opts.initTemp ?? 120;
-    const cooling  = opts.cooling  ?? 0.997;
-    const baseStep = opts.baseStep ?? 4; 
-    const baseAngle = opts.baseAngle ?? (Math.PI / 18); 
+  annealRunning = true;
+  placementTimeline = [];
+  showLoadingSpinner(true);
+  ConvergenceChart.start();
 
-    annealRunning = true;
-    LIGHTWEIGHT_METRICS = true;
-    ConvergenceChart.start();
-    uiToast('開始最佳化擺放');
-    let bestSnap   = snapshotState();
-    let bestEnergy = packingEnergy();
-    let T = initTemp;
-    for (let s = 0; s < steps && annealRunning; s++) {
-        const obj = objects[Math.floor(Math.random() * objects.length)];
-        const step = obj.userData?.unit || baseStep;
+  const steps = opts.steps ?? 10000;
+  const initTemp = opts.initTemp ?? 120;
+  const cooling = opts.cooling ?? 0.997;
+  const baseStep = opts.baseStep ?? 4;
 
-        const e0 = packingEnergy();
-        let trial = { applied:false };
+  uiToast('開始最佳化擺放');
+  let bestSnap = snapshotState();
+  let bestEnergy = packingEnergy();
+  let T = initTemp;
 
-        for (let k = 0; k < 60 && !trial.applied; k++) trial = tryPerturbOne(obj, step, baseAngle);
-        if (!trial.applied) { T *= cooling; if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r)); continue; }
+  renderer.setAnimationLoop(null);
 
-        const e1 = packingEnergy();
-        const dE = e1 - e0;
-        const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
-        if (accept) {
-            if (e1 < bestEnergy) { bestEnergy = e1; bestSnap = snapshotState(); }
-            if (Math.random() < 0.25) {
-                tryBestAxisOrientation_Y(obj);
-            }
-            if (s % 300 === 0) {
-                globalCompaction(1);
-            }
-            if (s % 10 === 0) nudgeViewDuringOptimization(obj, 150);
-            } else {
-                trial.undo && trial.undo();
-            }
-            T *= cooling;
-            if (s % 50 === 0) await new Promise(r=>requestAnimationFrame(r));
-        }
-    if (annealRunning) {
-        restoreState(bestSnap);
-        shakeAndSettle();
-        nudgeViewDuringOptimization(null, 260); 
-        globalCompaction(2); 
-        showVoidStats && showVoidStats(); 
-        renderVoidHUD();
-        uiToast('最佳化完成！');
-    } else {
-        uiToast('已停止最佳化');
+  for (let s = 0; s < steps && annealRunning; s++) {
+    const obj = objects[Math.floor(Math.random() * objects.length)];
+    const step = obj.userData?.unit || baseStep;
+    const e0 = packingEnergy();
+    let trial = { applied: false };
+
+    // 隨機嘗試移動／旋轉（最多嘗試 60 次）
+    for (let k = 0; k < 60 && !trial.applied; k++) {
+      const backupPos = obj.position.clone();
+      const backupRot = obj.rotation.clone();
+
+      // 嘗試隨機微移與旋轉
+      obj.position.x += (Math.random() - 0.5) * step;
+      obj.position.y += (Math.random() - 0.5) * step;
+      obj.position.z += (Math.random() - 0.5) * step;
+      obj.rotation.x += (Math.random() - 0.5) * 0.1;
+      obj.rotation.y += (Math.random() - 0.5) * 0.1;
+      obj.rotation.z += (Math.random() - 0.5) * 0.1;
+
+      // 🚫 若發生重疊 → 撤回、繼續嘗試
+      if (anyOverlap(obj, objects)) {
+        obj.position.copy(backupPos);
+        obj.rotation.copy(backupRot);
+        continue;
+      }
+
+      trial.applied = true;
+      trial.undo = () => {
+        obj.position.copy(backupPos);
+        obj.rotation.copy(backupRot);
+      };
     }
-    ConvergenceChart.stop();  
-    annealRunning = false;
-    LIGHTWEIGHT_METRICS = false;
+
+    if (!trial.applied) { T *= cooling; continue; }
+
+    const e1 = packingEnergy();
+    const dE = e1 - e0;
+    const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
+
+    if (accept) {
+      if (e1 < bestEnergy) {
+        bestEnergy = e1;
+        bestSnap = snapshotState();
+      }
+      placementTimeline.push(snapshotState());
+    } else {
+      trial.undo && trial.undo();
+    }
+
+    T *= cooling;
+    if (s % 80 === 0) await new Promise(r => requestAnimationFrame(r));
+  }
+
+  showLoadingSpinner(false);
+  annealRunning = false;
+  ConvergenceChart.stop();
+
+  await playPlacementTimeline();
+
+  restoreState(bestSnap);
+  globalCompaction(2);
+  renderVoidHUD();
+
+  const eff = computePackingEfficiencyCSG(containerBox);
+  uiToast(`最佳化完成（無重疊），空隙率 ${(100 - eff).toFixed(2)}%`);
+
+  setTimeout(() => {
+    renderer.setAnimationLoop((time) => {
+      controls.update();
+      TWEEN.update(time);
+      renderer.render(scene, camera);
+    });
+  }, 200);
+} */
+// === 🔹 最佳化流程（顯示小畫面＋錄影回放） ===
+async function runAnnealing(opts = {}) {
+  if (objects.length === 0) { uiToast('目前沒有物體可最佳化'); return; }
+  if (annealRunning) { uiToast('最佳化已在進行中'); return; }
+
+  annealRunning = true;
+
+  // 錄製參數：抽樣存幀，避免記憶體暴衝
+  placementTimeline = [];
+  const TIMELINE_SAMPLE_EVERY = 10;    // 每接受 10 次變更存 1 幀
+  const TIMELINE_MAX_FRAMES   = 1200;  // 最多 1200 幀
+  let acceptedCount = 0;
+
+  // UI：開啟小畫面 + 收斂圖 + 轉圈
+  showLoadingSpinner(true);
+  showOptimizePanel(true);
+  updateOptimizePanel({ subtitle:'計算初始能量…' });
+  ConvergenceChart.start();
+
+  // 參數
+  const steps    = opts.steps    ?? 10000;
+  const initTemp = opts.initTemp ?? 120;
+  const cooling  = opts.cooling  ?? 0.997;
+  const baseStep = opts.baseStep ?? 4;
+
+  // 為了不卡畫面
+  const slice = makeTimeSlicer(12);
+
+  // 期間：改用輕量度量（避免 CSG）
+  const prevLight = LIGHTWEIGHT_METRICS;
+  LIGHTWEIGHT_METRICS = true;
+
+  uiToast('開始最佳化擺放');
+  let bestSnap   = snapshotState();
+  let bestEnergy = packingEnergy();
+  let T = initTemp;
+
+  // ✨ 保持 render loop 繼續（不要停掉）
+  // renderer.setAnimationLoop(null); // ← 移除/不要呼叫，避免畫面停住
+
+  for (let s = 0; s < steps && annealRunning; s++) {
+    await slice();                           // 🔸 定期讓出主執行緒
+    if ((s & 63) === 0) {                    // 大約每 64 步更新一次小畫面
+      const r = measureBlueVoid();
+      updateOptimizePanel({
+        step: s, total: steps,
+        subtitle: `退火中（T=${T.toFixed(1)}）`,
+        emptyPct: r.emptyRatio * 100
+      });
+    }
+
+    const obj  = objects[Math.floor(Math.random() * objects.length)];
+    const step = obj.userData?.unit || baseStep;
+    const e0   = packingEnergy();
+
+    // 嘗試微擾
+    let applied = false;
+    const backupPos = obj.position.clone();
+    const backupRot = obj.rotation.clone();
+
+    for (let k = 0; k < 40 && !applied; k++) {
+      obj.position.x += (Math.random() - 0.5) * step;
+      obj.position.y += (Math.random() - 0.5) * step;
+      obj.position.z += (Math.random() - 0.5) * step;
+      obj.rotation.y += (Math.random() - 0.5) * 0.12;
+
+      // 尋找落地
+      obj.position.y = findRestingY(obj);
+
+      // 🚫 有重疊就撤回（⚠️ 修正：使用 isOverlapping，而非 anyOverlap）
+      if (isOverlapping(obj, obj)) {
+        obj.position.copy(backupPos);
+        obj.rotation.copy(backupRot);
+        continue;
+      }
+      applied = true;
+    }
+    if (!applied) { T *= cooling; continue; }
+
+    const e1 = packingEnergy();
+    const dE = e1 - e0;
+    const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
+
+    if (accept) {
+      if (e1 < bestEnergy) { bestEnergy = e1; bestSnap = snapshotState(); }
+      // 🎥 錄影：抽樣存幀並設上限
+      if ((++acceptedCount % TIMELINE_SAMPLE_EVERY) === 0) {
+        placementTimeline.push(snapshotState());
+        if (placementTimeline.length > TIMELINE_MAX_FRAMES) placementTimeline.shift();
+      }
+    } else {
+      // 撤回
+      obj.position.copy(backupPos);
+      obj.rotation.copy(backupRot);
+    }
+
+    T *= cooling;
+  }
+
+  // 收尾 UI
+  showLoadingSpinner(false);
+  ConvergenceChart.stop();
+  updateOptimizePanel({ step: steps, total: steps, subtitle:'回放中…' });
+
+  // 🎬 完成後回放擺放過程（你已有的函式）
+  await playPlacementTimeline();
+
+  // 還原最佳狀態 + 壓實 + HUD
+  restoreState(bestSnap);
+  globalCompaction(2);
+  renderVoidHUD();
+
+  // 顯示最終效率
+  const containerBox = getInteriorBox?.(); // 你的工具函式會回傳 Box3
+  if (containerBox) {
+    const eff = computePackingEfficiencyCSG(containerBox); // %
+    uiToast(`最佳化完成，容積利用率 ${eff.toFixed(1)}%`);
+    updateOptimizePanel({ subtitle:`完成！容積利用率 ${eff.toFixed(1)}%` });
+  } else {
+    uiToast('最佳化完成');
+    updateOptimizePanel({ subtitle:'完成！' });
+  }
+
+  // 關閉小畫面
+  setTimeout(() => showOptimizePanel(false), 900);
+
+  // 還原設定
+  annealRunning = false;
+  LIGHTWEIGHT_METRICS = prevLight;
+
+  // 若你曾停掉 render loop，這裡可重新啟動（你原本就有）
+  // setTimeout(() => {
+  //   renderer.setAnimationLoop((time) => {
+  //     controls.update();
+  //     TWEEN.update(time);
+  //     renderer.render(scene, camera);
+  //   });
+  // }, 50);
+}
+
+// === 🔹 停止最佳化 ===
+function stopAnnealing() {
+  annealRunning = false;
+  uiToast('已停止最佳化');
+  showLoadingSpinner(false);
 }
 
 /* document.getElementById('optimizeBtn')?.addEventListener('click', () => {
@@ -2211,6 +2541,18 @@ window.addEventListener('DOMContentLoaded', () => {
     ensureSceneButtons();
     renderVoidHUD();
 });
+
+// === 🔹 時間切片：避免長迴圈卡畫面 ===
+function makeTimeSlicer(budgetMs = 12) {
+  let last = performance.now();
+  return async function slice() {
+    const now = performance.now();
+    if (now - last >= budgetMs) {
+      await new Promise(r => setTimeout(r, 0));
+      last = performance.now();
+    }
+  };
+}
 
 // ---- 讓動畫不阻塞 UI（若你還沒定義它）
 async function uiYield() { return new Promise(r => requestAnimationFrame(() => r())); }
