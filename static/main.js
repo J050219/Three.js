@@ -1,42 +1,93 @@
-import * as THREE from 'three'; 
+import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as ThreeCSG from 'three-csg-ts';
 import { createRecognizer } from './recognizer.js';
 import * as TWEEN from '@tweenjs/tween.js';
 
-// === 🔹 新增全域記錄 ===
-let placementTimeline = []; // 儲存每步快照
+/* =========================================================
+   新增/調整【全域旗標 & 小工具】
+========================================================= */
+// 播放擺放過程錄影
+let placementTimeline = [];
 let playingTimeline = false;
 
-// === 🔹 新增：真實幾何體積計算（使用 CSG 精算） ===
-function measureTrueVolumeCSG(obj) {
-  try {
-    const geom = obj.geometry.clone();
-    geom.applyMatrix4(obj.matrixWorld);
-    let mesh = new THREE.Mesh(geom);
-    const csg = ThreeCSG.fromMesh(mesh);
-    const vol = csg.calcVolume();
-    return Math.abs(vol);
-  } catch {
-    const box = new THREE.Box3().setFromObject(obj);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    return size.x * size.y * size.z;
+// 輕量估算旗標（最佳化或 HUD 使用）
+let LIGHTWEIGHT_METRICS = false;
+
+// HUD：永遠走輕量估算 + 節流
+let HUD_LIGHTWEIGHT = true;
+const HUD_THROTTLE_MS = 500;
+let _hudNext = 0;
+
+// 模擬退火執行中
+let annealRunning = false;
+
+// 退火錄影抽樣
+const TIMELINE_SAMPLE_EVERY = 10;
+const TIMELINE_MAX_FRAMES = 1200;
+
+// 其他全域
+let OBBClass = null;
+const HAS_OBB = () => !!OBBClass;
+const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
+const LIB_KEY = 'recognizedLibrary';
+const UNDER_AUTOMATION = (typeof navigator !== 'undefined') && navigator.webdriver === true;
+const EPS = 0.5;
+const TETROMINO_TYPES = new Set(['tI','tT','tZ','tL']);
+const RIGHT_ANGLES = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
+
+// 能量權重
+const ENERGY_W_EMPTY    = 1.0;
+const ENERGY_W_FRAGMENT = 0.6;
+
+// 取樣精度
+const VOID_VOXEL_RES = 20;
+const VOID_MC_SAMPLES = 0;
+const CSG_MAX_BATCH = 12;
+const USE_ONLY_CONTAINER = true;
+
+// 佈局體素解析度（能量計算）
+const VOXEL_RES = 12;
+let PACK_VOXEL_RES = VOXEL_RES;
+
+// 其他 util
+const _collideRaycaster = new THREE.Raycaster();
+_collideRaycaster.firstHitOnly = false;
+
+/* =========================================================
+   UI：裝置提示/按鈕固定/Spinner/小面板/折線圖
+========================================================= */
+function uiToast(msg, ms = 1400) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'toast';
+    Object.assign(el.style, {
+      position:'fixed', left:'12px', bottom:'12px', padding:'8px 12px',
+      background:'rgba(0,0,0,.75)', color:'#fff', borderRadius:'8px',
+      zIndex:9999, fontFamily:'system-ui, sans-serif'
+    });
+    document.body.appendChild(el);
   }
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(el._h); el._h = setTimeout(()=> el.style.display='none', ms);
 }
 
-function computePackingEfficiencyCSG(containerBox) {
-  const box = containerBox.clone();
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  const containerVol = size.x * size.y * size.z;
-  let totalVol = 0;
-  for (const o of objects) totalVol += measureTrueVolumeCSG(o);
-  const eff = Math.min((totalVol / containerVol) * 100, 99.9);
-  return eff;
-}
+// 固定上方 UI 位置 & 寬度
+(function fixTopUI(){
+  const ui = document.getElementById('ui');
+  if (!ui) return;
+  Object.assign(ui.style, {
+    position: 'fixed',
+    top: '12px',
+    left: '12px',
+    zIndex: 10000,
+    width: '520px',
+    pointerEvents: 'auto'
+  });
+})();
 
-// === 🔹 Loading 轉圈提示 ===
+// Loading 轉圈
 function showLoadingSpinner(show = true) {
   let spinner = document.getElementById('loadingSpinner');
   if (!spinner) {
@@ -66,1491 +117,7 @@ function showLoadingSpinner(show = true) {
   spinner.style.display = show ? 'block' : 'none';
 }
 
-// === 🔹 播放擺放過程 ===
-async function playPlacementTimeline() {
-  if (placementTimeline.length === 0 || playingTimeline) return;
-  playingTimeline = true;
-  uiToast('正在播放擺放過程...');
-  for (const frame of placementTimeline) {
-    for (const f of frame) {
-      const obj = objects.find(o => o.uuid === f.id);
-      if (obj) {
-        obj.position.copy(f.pos);
-        obj.rotation.copy(f.rot);
-      }
-    }
-    renderer.render(scene, camera);
-    await new Promise(r => setTimeout(r, 25)); // 流暢播放
-  }
-  uiToast('播放完成');
-  playingTimeline = false;
-
-  // ✅ 釋放記憶體避免卡頓
-  for (const frame of placementTimeline) {
-    for (const f of frame) {
-      f.pos = null;
-      f.rot = null;
-    }
-  }
-  placementTimeline.length = 0;
-}
-
-
-// ✅ OBB 以動態載入，失敗則為 null（會自動用 fallback 撞檢）
-let OBBClass = null;
-const HAS_OBB = () => !!OBBClass;
-
-const CSG = ThreeCSG.CSG ?? ThreeCSG.default ?? ThreeCSG;
-const LIB_KEY = 'recognizedLibrary';
-const UNDER_AUTOMATION = (typeof navigator !== 'undefined') && navigator.webdriver === true;
-const EPS = 0.5;
-
-const TETROMINO_TYPES = new Set(['tI','tT','tZ','tL']);
-function typeLabel(t) {
-  switch (t) {
-    case 'tI': return 'I 形方塊';
-    case 'tT': return 'T 形方塊';
-    case 'tZ': return 'Z 形方塊';
-    case 'tL': return 'L 形方塊';
-    case 'cube': return '立方體';
-    case 'circle': return '球體';
-    case 'lshape': return '不規則';
-    default: return t;
-  }
-}
-
-function getLibrarySafe() {
-    let arr;
-    try { 
-        arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); 
-        return Array.isArray(arr)?arr:[];
-    } catch { 
-        return [];
-    }
-}
-
-const library = getLibrarySafe();
-
-function saveLibrary() {
-    try { 
-        localStorage.setItem(LIB_KEY, JSON.stringify(library)); 
-    }catch (e) { 
-        console.warn('localStorage 寫入失敗:', e); 
-    }
-}
-
-function summarize(item) {
-    const { type, width, height, depth, color, hasHole, holeWidth, holeHeight } = item;
-    const typeName = typeLabel(type);
-    const size = (type === 'circle') ? `${width}` :
-                 (TETROMINO_TYPES.has(type) ? `單位=${width}` :
-                 `${width}×${height}×${depth}`);
-    const hole = hasHole ? `孔 ${holeWidth ?? 0}×${holeHeight ?? 0}` : '無孔';
-    return { title: `${typeName} / ${size}`, hole, color };
-}
-
-function renderLibrary() {
-    const list = document.getElementById('libraryList');
-    if (!list) return;
-
-    if (!Array.isArray(library) || library.length === 0) {
-        list.innerHTML = `<div style="color:#666;font-size:12px;line-height:1.6;">
-        （清單目前沒有項目）<br>
-        ・按「辨識參數」後會自動加入<br>
-        ・或用上方表單產生後也會加入
-        </div>`;
-        return;
-    }
-    list.innerHTML = library.map((p, i) => {
-    const { title, hole, color } = summarize(p);
-    return `<div class="item" data-index="${i}">
-        <div><strong>${title}</strong></div>
-        <div class="row"><span class="chip" style="background:${color}"></span><span>${hole}</span></div>
-        <button class="btn use-item" data-index="${i}">放到場景</button>
-        </div>`;
-    }).join('');
-}
-
-function toCSGReady(mesh) {
-    mesh.updateMatrixWorld(true);
-    const g = mesh.geometry;
-    const gi = g.index ? g.toNonIndexed() : g.clone();
-    gi.computeVertexNormals();
-    const m = new THREE.Mesh(gi, mesh.material);
-    m.position.copy(mesh.position);
-    m.quaternion.copy(mesh.quaternion);
-    m.scale.copy(mesh.scale);
-    m.updateMatrix();
-    return m;
-}
-
-function _meshWorldVolume(mesh) {
-  const g = mesh.geometry; if (!g || !g.attributes?.position) return 0;
-  mesh.updateMatrixWorld(true);
-  const m4 = mesh.matrixWorld, pos = g.attributes.position, idx = g.index ? g.index.array : null;
-  const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
-  const t1 = new THREE.Vector3(), t2 = new THREE.Vector3();
-  let vol = 0;
-  const add = () => { t1.copy(v1).sub(v0); t2.copy(v2).sub(v0); vol += v0.dot(t1.cross(t2)) / 6; };
-  if (idx) for (let i=0;i<idx.length;i+=3){ v0.fromBufferAttribute(pos,idx[i]).applyMatrix4(m4);
-    v1.fromBufferAttribute(pos,idx[i+1]).applyMatrix4(m4);
-    v2.fromBufferAttribute(pos,idx[i+2]).applyMatrix4(m4); add(); }
-  else for (let i=0;i<pos.count;i+=3){ v0.fromBufferAttribute(pos,i).applyMatrix4(m4);
-    v1.fromBufferAttribute(pos,i+1).applyMatrix4(m4);
-    v2.fromBufferAttribute(pos,i+2).applyMatrix4(m4); add(); }
-  return Math.abs(vol);
-}
-
-function worldVolumeOfObject(root){ let sum=0; root.updateMatrixWorld(true);
-  root.traverse(n=>{ if(n.isMesh) sum+=_meshWorldVolume(n); }); return sum; }
-
-function makeContainerInteriorMesh() {
-  const cb = new THREE.Box3().setFromObject(container);
-  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-  const w = cb.max.x - cb.min.x, h = cb.max.y - palletTop, d = cb.max.z - cb.min.z;
-  if (h <= 0) return null;
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshBasicMaterial());
-  m.position.set((cb.min.x+cb.max.x)/2, palletTop + h/2, (cb.min.z+cb.max.z)/2);
-  m.updateMatrixWorld(true);
-  return m;
-}
-
-function ensureVoidHUD() {
-  let el = document.getElementById('voidHud');
-  if (el) return el;
-  el = document.createElement('div');
-  el.id = 'voidHud';
-  Object.assign(el.style, {
-    position: 'fixed', right: '12px', bottom: '12px',
-    background: 'rgba(0,0,0,.65)', color: '#fff',
-    padding: '8px 10px', borderRadius: '8px',
-    fontFamily: 'system-ui, sans-serif', fontSize: '12px',
-    zIndex: 9999
-  });
-  document.body.appendChild(el);
-  return el;
-}
-
-function renderVoidHUD() {
-  const hud = ensureVoidHUD();
-  const r = measureBlueVoid();
-  hud.textContent =
-    `空隙 ${ (r.emptyRatio*100).toFixed(1) }%  ` ;
-}
-
-function showVoidStats() {
-  const r = measureBlueVoid();
-  const msg = `空隙 ${(r.emptyRatio*100).toFixed(1)}% `;
-  console.log('[Blue-Container Void]', r, msg);
-  if (typeof uiToast === 'function') uiToast(msg, 2200);
-  renderVoidHUD();
-}
-
-function getInteriorBox() {
-  const interior = makeContainerInteriorMesh();
-  if (!interior) return null;
-  return new THREE.Box3().setFromObject(interior);
-}
-
-/* function measureBlueVoidFast() {
-  const interiorBox = getInteriorBox();
-  if (!interiorBox) return { emptyVolume:0, emptyRatio:0, containerVolume:0, solidVolume:0 };
-
-  const containerVolume = (interiorBox.max.x - interiorBox.min.x) *
-                          (interiorBox.max.y - interiorBox.min.y) *
-                          (interiorBox.max.z - interiorBox.min.z);
-
-  let solidVolume = 0;
-  for (const o of objects) {
-    const ob = new THREE.Box3().setFromObject(o);
-    if (!interiorBox.intersectsBox(ob)) continue;
-
-    const objVol = worldVolumeOfObject(o); // 真實世界體積（非 AABB 體積）
-    if (interiorBox.containsBox(ob)) {
-      solidVolume += objVol;
-    } else {
-      const overlap = ob.clone().intersect(interiorBox);
-      if (!overlap.isEmpty()) {
-        const overVol = (overlap.max.x - overlap.min.x) *
-                        (overlap.max.y - overlap.min.y) *
-                        (overlap.max.z - overlap.min.z);
-        const aabbVol = (ob.max.x - ob.min.x) *
-                        (ob.max.y - ob.min.y) *
-                        (ob.max.z - ob.min.z);
-        const ratio = aabbVol > 0 ? Math.min(1, Math.max(0, overVol / aabbVol)) : 0;
-        solidVolume += objVol * ratio;
-      }
-    }
-  }
-
-  const emptyVolume = Math.max(0, containerVolume - solidVolume);
-  const emptyRatio  = containerVolume > 0 ? emptyVolume / containerVolume : 0;
-  return { emptyVolume, emptyRatio, containerVolume, solidVolume };
-} */
-
-  // ===== 精準空隙估算：優先 CSG，失敗回退 Voxel + 射線點內測試 =====
-// ===== 精準空隙估算：優先 CSG，失敗回退 Voxel + 射線點內測試 =====
-const VOID_VOXEL_RES   = 20;   // 回退取樣解析度（邊長格數），可視效能 18~36
-const VOID_MC_SAMPLES  = 0;    // 若想用隨機取樣，可設 >0，例如 40000；預設用規則格點
-const CSG_MAX_BATCH    = 12;   // 一次 union 的批量，避免 CSG 爆炸
-const USE_ONLY_CONTAINER = true; // 只統計藍色容器內（忽略 staging）
-
-function _interiorMeshSolid() {
-  const cb = new THREE.Box3().setFromObject(container);
-  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-  const w = cb.max.x - cb.min.x, h = cb.max.y - palletTop, d = cb.max.z - cb.min.z;
-  if (h <= 0) return null;
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial());
-  m.position.set((cb.min.x + cb.max.x)/2, palletTop + h/2, (cb.min.z + cb.max.z)/2);
-  m.updateMatrixWorld(true);
-  return m;
-}
-
-// 把一個「物件」裁切到容器內部；回傳可做 CSG 的 mesh（可能為 null）
-function _clipToInteriorCSG(obj, interiorMesh) {
-  try {
-    const a = new THREE.Box3().setFromObject(obj);
-    const b = new THREE.Box3().setFromObject(interiorMesh);
-    if (!a.intersectsBox(b)) return null;
-
-    const parts = [];
-    obj.updateMatrixWorld(true);
-    obj.traverse(n => {
-      if (n.isMesh && n.geometry) parts.push(toCSGReady(n));
-    });
-    if (!parts.length) return null;
-
-    let acc = parts[0];
-    for (let i = 1; i < parts.length; i++) {
-      try { acc = CSG.union(acc, parts[i]); } catch {}
-    }
-
-    const clipped = CSG.intersect(acc, toCSGReady(interiorMesh));
-    clipped.updateMatrixWorld(true);
-    return clipped;
-  } catch { return null; }
-}
-
-// 將多個 mesh 做批次 union（避免一次 union 太多導致失敗）
-function _batchUnion(meshes) {
-  if (!meshes.length) return null;
-  let current = meshes[0];
-  for (let i = 1; i < meshes.length; i++) {
-    try {
-      current = CSG.union(current, meshes[i]);
-    } catch {
-      const batch = [];
-      for (let k = i; k < Math.min(meshes.length, i + CSG_MAX_BATCH); k++) batch.push(meshes[k]);
-      try {
-        let bacc = batch[0];
-        for (let t = 1; t < batch.length; t++) bacc = CSG.union(bacc, batch[t]);
-        current = CSG.union(current, bacc);
-        i += (batch.length - 1);
-      } catch {}
-    }
-  }
-  current.updateMatrixWorld(true);
-  return current;
-}
-
-// CSG 路徑：盡量精準的體積（含鑽孔、切邊）
-function _solidVolumeViaCSG() {
-  const interior = _interiorMeshSolid();
-  if (!interior) return null;
-
-  const inside = [];
-  for (const o of objects) {
-    if (USE_ONLY_CONTAINER && areaOf(o) !== 'container') continue;
-    const clipped = _clipToInteriorCSG(o, interior);
-    if (clipped) inside.push(clipped);
-  }
-  const containerVol = _meshWorldVolume(toCSGReady(interior));
-  if (!inside.length) return { containerVolume: containerVol, solidVolume: 0 };
-
-  const merged = _batchUnion(inside);
-  if (!merged) return null;
-
-  const solid = _meshWorldVolume(merged);
-  return { containerVolume: containerVol, solidVolume: Math.max(0, Math.min(solid, containerVol)) };
-}
-
-// Voxel/蒙地卡羅回退：射線點內測試 + 球體快速測試
-function _pointInsideAnyObject(p, rayDir = new THREE.Vector3(1,0,0)) {
-  const candidates = USE_ONLY_CONTAINER ? objects.filter(o => areaOf(o) === 'container') : objects;
-
-  // 球體快測
-  for (const o of candidates) {
-    if (o.userData?.isSphere) {
-      const { center, r } = getWorldSphereFromMesh(o);
-      if (center.distanceToSquared(p) <= r*r) return true;
-    }
-  }
-
-  // 射線 parity 測試
-  _collideRaycaster.set(p, rayDir);
-  let hitCount = 0;
-  for (const o of candidates) {
-    const hits = _collideRaycaster.intersectObject(o, true);
-    if (hits.length) {
-      const n = hits.filter(h => h.distance > 1e-6).length;
-      hitCount += n;
-    }
-  }
-  return (hitCount % 2) === 1;
-}
-
-function _solidVolumeViaVoxel() {
-  const interior = _interiorMeshSolid();
-  if (!interior) return null;
-  const ibox = new THREE.Box3().setFromObject(interior);
-
-  const volContainer =
-    (ibox.max.x - ibox.min.x) * (ibox.max.y - ibox.min.y) * (ibox.max.z - ibox.min.z);
-
-  const nx = VOID_VOXEL_RES, ny = VOID_VOXEL_RES, nz = VOID_VOXEL_RES;
-  const dx = (ibox.max.x - ibox.min.x) / nx;
-  const dy = (ibox.max.y - ibox.min.y) / ny;
-  const dz = (ibox.max.z - ibox.min.z) / nz;
-
-  let insideCount = 0, total = nx * ny * nz;
-  const p = new THREE.Vector3();
-  const ray = new THREE.Vector3(1,0,0);
-
-  if (VOID_MC_SAMPLES > 0) {
-    total = VOID_MC_SAMPLES;
-    for (let s = 0; s < VOID_MC_SAMPLES; s++) {
-      p.set(
-        THREE.MathUtils.lerp(ibox.min.x, ibox.max.x, Math.random()),
-        THREE.MathUtils.lerp(ibox.min.y, ibox.max.y, Math.random()),
-        THREE.MathUtils.lerp(ibox.min.z, ibox.max.z, Math.random())
-      );
-      if (_pointInsideAnyObject(p, ray)) insideCount++;
-    }
-  } else {
-    for (let j = 0; j < ny; j++) {
-      const y = ibox.min.y + (j + 0.5) * dy;
-      for (let k = 0; k < nz; k++) {
-        const z = ibox.min.z + (k + 0.5) * dz;
-        for (let i = 0; i < nx; i++) {
-          const x = ibox.min.x + (i + 0.5) * dx;
-          p.set(x, y, z);
-          if (_pointInsideAnyObject(p, ray)) insideCount++;
-        }
-      }
-    }
-  }
-
-  const solidRatio = insideCount / total;
-  const solidVol   = volContainer * solidRatio;
-  return { containerVolume: volContainer, solidVolume: solidVol };
-}
-let LIGHTWEIGHT_METRICS = false; // 最佳化時用輕量估算
-// 對外：新的空隙估算（只算藍色容器內、排除紅色暫存區）
-function measureBlueVoid() {
-  // 1) 優先用 CSG 幾何體積（最準）
-  /* try {
-    const r = _solidVolumeViaCSG();
-    if (r) {
-      const empty = Math.max(0, r.containerVolume - r.solidVolume);
-      return {
-        emptyVolume: empty,
-        emptyRatio:  r.containerVolume > 0 ? empty / r.containerVolume : 0,
-        containerVolume: r.containerVolume,
-        solidVolume: r.solidVolume
-      };
-    }
-  } catch {} */
-
-  // 最佳化進行中：直接用 Voxel（避免 CSG 卡主執行緒）
-  if (!LIGHTWEIGHT_METRICS) {
-    try {
-      const r = _solidVolumeViaCSG();
-      if (r) {
-        const empty = Math.max(0, r.containerVolume - r.solidVolume);
-        return { emptyVolume: empty, emptyRatio: r.containerVolume > 0 ? empty / r.containerVolume : 0,
-                 containerVolume: r.containerVolume, solidVolume: r.solidVolume };
-      }
-    } catch {}
-  }
-  // 2) 回退：Voxel/蒙地卡羅 + 射線點內測試
-  const v = _solidVolumeViaVoxel();
-  if (v) {
-    const empty = Math.max(0, v.containerVolume - v.solidVolume);
-    return {
-      emptyVolume: empty,
-      emptyRatio:  v.containerVolume > 0 ? empty / v.containerVolume : 0,
-      containerVolume: v.containerVolume,
-      solidVolume: v.solidVolume
-    };
-  }
-
-  // 3) 萬一都失敗：回傳 0
-  return { emptyVolume:0, emptyRatio:0, containerVolume:0, solidVolume:0 };
-}
-
-
-/* ===================== 收斂曲線 (右上角) ===================== */
-const ConvergenceChart = (() => {
-  const S = {   // 狀態
-    el: null,    // wrapper
-    cvs: null,   // canvas
-    ctx: null,
-    data: [],    // {t:秒, y:百分比}
-    start: 0,
-    raf: 0,
-    maxPts: 600, // 最多點數（約10分鐘@1Hz）
-    running: false,
-    w: 280,
-    h: 140
-  };
-
-  function ensureUI() {
-    if (S.el) return;
-    const el = document.createElement('div');
-    el.id = 'convChart';
-    Object.assign(el.style, {
-      position:'fixed', right:'12px', top:'12px', zIndex:9999,
-      background:'rgba(0,0,0,.55)', borderRadius:'10px',
-      padding:'8px', color:'#fff', fontFamily:'system-ui,sans-serif',
-      userSelect:'none', pointerEvents:'none'   // 不擋滑鼠操作
-    });
-    const title = document.createElement('div');
-    title.textContent = '收斂曲線（空隙 %）';
-    Object.assign(title.style, { fontSize:'12px', opacity:.9, marginBottom:'4px' });
-
-    const cvs = document.createElement('canvas');
-    cvs.width = S.w; cvs.height = S.h;
-    cvs.style.display = 'block';
-
-    el.appendChild(title);
-    el.appendChild(cvs);
-    document.body.appendChild(el);
-
-    S.el = el; S.cvs = cvs; S.ctx = cvs.getContext('2d');
-    fitDPR();
-    addEventListener('resize', fitDPR);
-  }
-
-  function fitDPR() {
-    if (!S.cvs) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    S.cvs.width  = Math.round(S.w * dpr);
-    S.cvs.height = Math.round(S.h * dpr);
-    S.cvs.style.width  = S.w + 'px';
-    S.cvs.style.height = S.h + 'px';
-  }
-
-  function pushPoint() {
-    const r = measureBlueVoid();                 // 直接用你已有的估算
-    const y = Math.max(0, Math.min(100, r.emptyRatio * 100));
-    const t = (performance.now() - S.start) / 1000;  // 秒
-    S.data.push({ t, y });
-    if (S.data.length > S.maxPts) S.data.shift();
-  }
-
-  function yToPix(y) {
-    // y是百分比，0在底部、100在頂部
-    const p = S.cvs.height / (Math.min(window.devicePixelRatio || 1, 2));
-    return Math.round((1 - y / 100) * (p - 18) + 6); // 上下留白
-  }
-  function xToPix(i) {
-    // 均勻鋪滿整張圖
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = S.w;
-    const n = Math.max(1, S.data.length - 1);
-    return Math.round((i / n) * (w - 16) + 8) * dpr;
-  }
-
-  function draw() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const ctx = S.ctx; if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);           // reset to 1 CSS pixel
-    ctx.clearRect(0, 0, S.w, S.h);
-
-    // 座標系與格線
-    ctx.strokeStyle = 'rgba(255,255,255,.25)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(32, 6);   ctx.lineTo(32, S.h - 14);    // y 軸
-    ctx.lineTo(S.w - 6, S.h - 14);                    // x 軸
-    ctx.stroke();
-
-    // y 軸刻度（0/25/50/75/100）
-    ctx.fillStyle = 'rgba(255,255,255,.7)';
-    ctx.font = '10px system-ui';
-    [0,25,50,75,100].forEach(v=>{
-      const y = yToPix(v);
-      ctx.fillText(String(v), 6, y + 3);
-      ctx.strokeStyle = 'rgba(255,255,255,.12)';
-      ctx.beginPath();
-      ctx.moveTo(32, y); ctx.lineTo(S.w - 6, y);
-      ctx.stroke();
-    });
-
-    if (S.data.length < 2) return;
-
-    // 曲線
-    ctx.save();
-    ctx.beginPath();
-    for (let i=0;i<S.data.length;i++){
-      const px = xToPix(i) / dpr;
-      const py = yToPix(S.data[i].y);
-      if (i===0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#5ad3ff';  // 藍綠色
-    ctx.stroke();
-    ctx.restore();
-
-    // 右下角顯示最新數值
-    const latest = S.data[S.data.length-1].y;
-    ctx.fillStyle = '#fff';
-    ctx.font = '11px system-ui';
-    ctx.fillText(`${latest.toFixed(1)}%`, S.w - 52, S.h - 22);
-  }
-
-  function loop() {
-    if (!S.running) return;
-    // 取樣頻率：~ 每 300ms 一筆，避免太密
-    if (!S._last || performance.now() - S._last > 300) {
-      S._last = performance.now();
-      pushPoint();
-      draw();
-    }
-    S.raf = requestAnimationFrame(loop);
-  }
-
-  function start() {
-    ensureUI();
-    S.data = [];
-    S.start = performance.now();
-    S.running = true;
-    S._last = 0;
-    cancelAnimationFrame(S.raf);
-    loop();
-  }
-
-  function stop() {
-    S.running = false;
-    cancelAnimationFrame(S.raf);
-    // 停下時再畫一次，確保最終值
-    pushPoint();
-    draw();
-  }
-
-  // 對外 API
-  return { start, stop, draw };
-})();
-
-const _collideRaycaster = new THREE.Raycaster();
-_collideRaycaster.firstHitOnly = false; 
-
-function isPointInsideMesh(p, mesh) {
-  _collideRaycaster.set(p, new THREE.Vector3(1,0,0));
-  const hits = _collideRaycaster.intersectObject(mesh, true);
-  const n = hits.filter(h => h.distance > 1e-6).length;
-  return (n % 2) === 1;
-}
-
-function getWorldAABBCorners(mesh){
-  const b = new THREE.Box3().setFromObject(mesh);
-  return [
-    new THREE.Vector3(b.min.x,b.min.y,b.min.z),
-    new THREE.Vector3(b.max.x,b.min.y,b.min.z),
-    new THREE.Vector3(b.min.x,b.max.y,b.min.z),
-    new THREE.Vector3(b.max.x,b.max.y,b.min.z),
-    new THREE.Vector3(b.min.x,b.min.y,b.max.z),
-    new THREE.Vector3(b.max.x,b.min.y,b.max.z),
-    new THREE.Vector3(b.min.x,b.max.y,b.max.z),
-    new THREE.Vector3(b.max.x,b.max.y,b.max.z),
-  ];
-}
-
-function buildMeshOBB(mesh) {
-  const geo = mesh.geometry;
-  if (!geo.boundingBox) geo.computeBoundingBox();
-  const bb = geo.boundingBox;
-  const center = new THREE.Vector3();
-  const halfSize = new THREE.Vector3();
-  bb.getCenter(center);
-  bb.getSize(halfSize).multiplyScalar(0.5);
-
-  const obb = new OBBClass(center.clone(), halfSize.clone());
-  mesh.updateMatrixWorld(true);
-  obb.applyMatrix4(mesh.matrixWorld);
-  obb.halfSize.subScalar(1e-4); 
-  return obb;
-}
-
-function meshesReallyIntersect_OBB(a, b) {
-  if (!HAS_OBB()) return null; 
-  const ba = new THREE.Box3().setFromObject(a);
-  const bb = new THREE.Box3().setFromObject(b);
-  if (!ba.intersectsBox(bb)) return false;
-
-  const aMeshes = [], bMeshes = [];
-  a.updateMatrixWorld(true); b.updateMatrixWorld(true);
-  a.traverse(n => { if (n.isMesh) aMeshes.push(n); });
-  b.traverse(n => { if (n.isMesh) bMeshes.push(n); });
-
-  for (const am of aMeshes) {
-    const obbA = buildMeshOBB(am);
-    for (const bm of bMeshes) {
-      const obbB = buildMeshOBB(bm);
-      if (obbA.intersectsOBB(obbB)) return true;
-    }
-  }
-  return false;
-}
-
-function meshesReallyIntersect_Fallback(a, b) {
-  const ba = new THREE.Box3().setFromObject(a);
-  const bb = new THREE.Box3().setFromObject(b);
-  if (!ba.intersectsBox(bb)) return false;
-
-  const ac = getWorldAABBCorners(a);
-  for (const p of ac) if (isPointInsideMesh(p, b)) return true;
-
-  const bc = getWorldAABBCorners(b);
-  for (const p of bc) if (isPointInsideMesh(p, a)) return true;
-
-  return false;
-}
-
-function meshesReallyIntersect_CSG(a, b) {
-  const ba = new THREE.Box3().setFromObject(a);
-  const bb = new THREE.Box3().setFromObject(b);
-  if (!ba.intersectsBox(bb)) return false;
-  let hit = false;
-  const aMeshes = [], bMeshes = [];
-  a.updateMatrixWorld(true);
-  b.updateMatrixWorld(true);
-  a.traverse(n => { if (n.isMesh) aMeshes.push(n); });
-  b.traverse(n => { if (n.isMesh) bMeshes.push(n); });
-
-  const EPS_VOL = 1e-3; 
-  for (const am of aMeshes) {
-    for (const bm of bMeshes) {
-      const ab = new THREE.Box3().setFromObject(am);
-      const bb2 = new THREE.Box3().setFromObject(bm);
-      if (!ab.intersectsBox(bb2)) continue;
-
-      try {
-        const inter = CSG.intersect(toCSGReady(am), toCSGReady(bm));
-        inter.updateMatrixWorld(true);
-        const vol = _meshWorldVolume(inter);
-        if (vol > EPS_VOL) { hit = true; break; }
-      } catch (e) {
-      }
-    }
-    if (hit) break;
-  }
-  return hit;
-}
-
-function getWorldSphereFromMesh(sphereMesh) {
-  const center = new THREE.Vector3().setFromMatrixPosition(sphereMesh.matrixWorld);
-  const s = new THREE.Vector3();
-  sphereMesh.updateMatrixWorld(true);
-  sphereMesh.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
-  const rWorld = (sphereMesh.userData?.sphereR || 1) * Math.max(s.x, s.y, s.z);
-  return { center, r: rWorld };
-}
-
-function sphereIntersectsMeshTriangles(sphereMesh, otherMesh) {
-  const { center, r } = getWorldSphereFromMesh(sphereMesh);
-  const rEff = Math.max(0, r - 1e-3);
-  const r2 = rEff * rEff;
-
-  let hit = false;
-  const tri = new THREE.Triangle();
-  const closest = new THREE.Vector3();
-  const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
-
-  otherMesh.updateMatrixWorld(true);
-
-  const testOne = (m) => {
-    const g = m.geometry;
-    if (!g || !g.attributes?.position) return;
-    const pos = g.attributes.position;
-    const idx = g.index ? g.index.array : null;
-
-    if (idx) {
-      for (let i = 0; i < idx.length; i += 3) {
-        vA.fromBufferAttribute(pos, idx[i+0]).applyMatrix4(m.matrixWorld);
-        vB.fromBufferAttribute(pos, idx[i+1]).applyMatrix4(m.matrixWorld);
-        vC.fromBufferAttribute(pos, idx[i+2]).applyMatrix4(m.matrixWorld);
-        tri.set(vA, vB, vC);
-        tri.closestPointToPoint(center, closest);
-        if (closest.distanceToSquared(center) <= r2) { hit = true; return true; }
-      }
-    } else {
-      for (let i = 0; i < pos.count; i += 3) {
-        vA.fromBufferAttribute(pos, i+0).applyMatrix4(m.matrixWorld);
-        vB.fromBufferAttribute(pos, i+1).applyMatrix4(m.matrixWorld);
-        vC.fromBufferAttribute(pos, i+2).applyMatrix4(m.matrixWorld);
-        tri.set(vA, vB, vC);
-        tri.closestPointToPoint(center, closest);
-        if (closest.distanceToSquared(center) <= r2) { hit = true; return true; }
-      }
-    }
-  };
-
-  const bb = new THREE.Box3().setFromObject(otherMesh);
-  if (!bb.expandByScalar(r).containsPoint(center)) {
-    const sph = new THREE.Sphere(center, r);
-    if (!bb.intersectsSphere || !bb.intersectsSphere(sph)) return false;
-  }
-  otherMesh.traverse(n => { if (!hit && n.isMesh) testOne(n); });
-  if (hit) return true;
-  if (isPointInsideMesh(center, otherMesh)) return true;
-  return false;
-}
-
-function sphereVsSphereIntersect(a, b) {
-  const A = getWorldSphereFromMesh(a);
-  const B = getWorldSphereFromMesh(b);
-  const r = A.r + B.r;
-  return A.center.distanceToSquared(B.center) <= r * r;
-}
-
-// ✅ 統一入口（覆蓋舊的）：先處理球體，再用 OBB，最後才 fallback
-function meshesReallyIntersect(a, b) {
-  const ba = new THREE.Box3().setFromObject(a);
-  const bb = new THREE.Box3().setFromObject(b);
-  if (!ba.intersectsBox(bb)) return false;
-  const aSphere = !!a.userData?.isSphere;
-  const bSphere = !!b.userData?.isSphere;
-  if (aSphere && bSphere) return sphereVsSphereIntersect(a, b);
-  if (aSphere) {
-    let hit = false;
-    b.traverse(n => { if (!hit && n.isMesh) hit = sphereIntersectsMeshTriangles(a, n); });
-    if (hit) return true;
-  } else if (bSphere) {
-    let hit = false;
-    a.traverse(n => { if (!hit && n.isMesh) hit = sphereIntersectsMeshTriangles(b, n); });
-    if (hit) return true;
-  }
-  const r = meshesReallyIntersect_OBB(a, b);
-  if (r === true) return true;
-  if (meshesReallyIntersect_Fallback(a, b)) return true;
-  if (aSphere || bSphere) return false;
-  return meshesReallyIntersect_CSG(a, b);
-}
-
-function defaultHoleTypeByShape(type, hasHole) {
-    if (!hasHole) return 'none';
-    if (type === 'circle') return 'cyl'; 
-    return 'box';
-}
-
-function axisThickness(w, h, d, axis = 'y') {
-  axis = axis.toLowerCase();
-  return axis === 'x' ? w : axis === 'y' ? h : d;
-}
-
-function makeHoleMesh(opts = {}) {
-  const holeType = (opts.holeType || 'box').toLowerCase();
-  const axis     = (opts.holeAxis || 'y').toLowerCase();
-  const width    = Math.max(1, (opts.holeWidth  || 10));  
-  const height   = Math.max(1, (opts.holeHeight || 10));  
-  const depth    = Math.max(1, (opts.holeDepth  || 10));  
-
-  if (holeType === 'sphere') {
-    const r = Math.max(1, width * 0.5) - EPS;
-    const g = new THREE.SphereGeometry(r, 24, 16);
-    return toCSGReady(new THREE.Mesh(g, new THREE.MeshBasicMaterial()));
-  }
-
-  if (holeType === 'cyl') {
-    const r = Math.max(1, width * 0.5);
-    const h = depth + 2 * EPS; 
-    const g = new THREE.CylinderGeometry(r, r, h, 24);
-    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
-    if (axis === 'x') m.rotation.z = Math.PI / 2;
-    if (axis === 'z') m.rotation.x = Math.PI / 2;
-    return toCSGReady(m);
-  }
-
-  // box 型孔：沿指定軸做穿透厚度
-  let bx = width  + 2 * EPS;
-  let by = height + 2 * EPS;
-  let bz = depth  + 2 * EPS;
-  if (axis === 'x') { bx = depth  + 2 * EPS; }
-  else if (axis === 'y') { by = depth  + 2 * EPS; }
-  else { bz = depth  + 2 * EPS; }
-
-  const g = new THREE.BoxGeometry(bx, by, bz);
-  return toCSGReady(new THREE.Mesh(g, new THREE.MeshBasicMaterial()));
-}
-
-function addToLibrary(params) {
-    const n = (v,d)=> (Number.isFinite(+v)? +v : d);
-    const t = params.type || 'cube';
-    const isTet = TETROMINO_TYPES.has(t);
-    const hasHoleClean = isTet ? false : !!params.hasHole;
-    const clean = {
-        type: t,
-        width:  n(params.width, 20),
-        height: n(params.height, isTet ? params.width : (t === 'circle' ? params.width : 20)),
-        depth:  n(params.depth,  isTet ? params.width : (t === 'circle' ? params.width : 20)),
-        color:  params.color || '#00ff00',
-        hasHole: hasHoleClean,
-        holeWidth:  n(params.holeWidth, 10),
-        holeHeight: n(params.holeHeight, 10),
-        holeType: params.holeType || defaultHoleTypeByShape(t, hasHoleClean),
-        holeAxis: (params.holeAxis || 'z').toLowerCase()
-    };
-    console.log('[Library] add', clean);
-    library.unshift(clean);
-    library.splice(60);
-    saveLibrary();
-    renderLibrary();
-}
-
-document.addEventListener('click', (e) => {
-    const btn = e.target.closest?.('.use-item');
-    if (!btn) return;
-    const idx = +btn.dataset.index;
-    const item = library[idx];
-    if (!item) return;
-    createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight, item.holeType, item.holeAxis);
-});
-
-function normalizeColor(input) {
-    const map = {
-        "紅色": "#ff0000",
-        "綠色": "#00ff00",
-        "藍色": "#0000ff",
-        "黃色": "#ffff00",
-        "紫色": "#800080",
-        "黑色": "#000000",
-        "白色": "#ffffff",
-        "橘色": "#ffa500",
-        "灰色": "#808080",
-        "粉紅色": "#ffc0cb"
-    };
-    if (!input) return '#00ff00';
-    if (input.startsWith('#')) return input;
-    const hex = map[input.trim()];
-    return hex && /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#00ff00';
-}
-
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
-
-camera.position.set(150, 150, 150);
-camera.lookAt(0, 45, 0);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.05;
-controls.maxPolarAngle = Math.PI / 2;
-controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
-controls.mouseButtons.RIGHT = null;
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-const light = new THREE.DirectionalLight(0xffffff, 1);
-light.position.set(50, 50, 100);
-scene.add(light);
-
-const palletGeometry = new THREE.BoxGeometry(110, 10, 110);
-const palletMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
-const pallet = new THREE.Mesh(palletGeometry, palletMaterial);
-pallet.position.y = -5;
-scene.add(pallet);
-
-const containerGeometry = new THREE.BoxGeometry(110, 110, 110);
-const containerMaterial = new THREE.MeshStandardMaterial({
-    color: 0x00ffff,
-    transparent: true,
-    opacity: 0.4,
-    side: THREE.DoubleSide
-});
-const container = new THREE.Mesh(containerGeometry, containerMaterial);
-/* container.position.y = 45; */
-function centerContainerOnPallet() {
-  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-  const ch = containerGeometry.parameters.height;
-  // 讓容器「底部」剛好貼齊托盤上表面，因此中心在 palletTop + ch/2
-  container.position.set(0, palletTop + ch / 2, 0);
-}
-centerContainerOnPallet();
-const containerEdges = new THREE.LineSegments(
-    new THREE.EdgesGeometry(containerGeometry),
-    new THREE.LineBasicMaterial({ color: 0x00ffff })
-);
-container.add(containerEdges);
-scene.add(container);
-
-const stagingSize = 220;
-const stagingPad = new THREE.Mesh(new THREE.BoxGeometry(stagingSize, 8, stagingSize), new THREE.MeshBasicMaterial({ color: 0x777777 }));
-const containerWidth = containerGeometry.parameters.width;
-stagingPad.position.set(container.position.x + containerWidth / 2 + stagingSize / 2 + 20, -5, container.position.z);
-scene.add(stagingPad);
-
-const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 220, stagingSize);
-const stageFrameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent : true, opacity : 0.15, side : THREE.DoubleSide });
-const stagingFrame = new THREE.Mesh(stageFrameGeo, stageFrameMat);
-stagingFrame.position.set(
-  stagingPad.position.x,
-  stagingPad.position.y + stagingPad.geometry.parameters.height/2 + stageFrameGeo.parameters.height/2, // ← 自動置中
-  stagingPad.position.z
-);
-stagingFrame.add(new THREE.LineSegments(
-  new THREE.EdgesGeometry(stageFrameGeo),
-  new THREE.LineBasicMaterial({ color: 0x00ffff })
-));
-scene.add(stagingFrame);
-
-const objects = [];
-let selectedObj = null;
-let selectionHelper = null;
-let FAST_PACKING = true;
-
-function showSelection(obj) {
-    if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
-    if (obj) {
-        selectionHelper = new THREE.BoxHelper(obj, 0xffaa00);
-        scene.add(selectionHelper);
-    }
-}
-
-function deleteSelected() {
-    if (!selectedObj) return;
-    const i = objects.indexOf(selectedObj);
-    if (i >= 0) objects.splice(i, 1);
-    scene.remove(selectedObj);
-    selectedObj = null;
-    if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
-    renderVoidHUD();
-}
-
-function clearAllObjects() {
-    objects.forEach(o => scene.remove(o));
-    objects.length = 0;
-    selectedObj = null;
-    if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
-    renderVoidHUD();
-}
-
-function ensureSceneButtons() {
-    const ui = document.getElementById('ui');
-    if (!ui) return;
-    if (!document.getElementById('deleteSelectedBtn')) {
-        const b1 = document.createElement('button');
-        b1.id = 'deleteSelectedBtn';
-        b1.textContent = '刪除選取';
-        b1.style.marginLeft = '8px';
-        ui.appendChild(b1);
-        b1.addEventListener('click', deleteSelected);
-    }
-    if (!document.getElementById('clearAllBtn')) {
-        const b2 = document.createElement('button');
-        b2.id = 'clearAllBtn';
-        b2.textContent = '清空容器';
-        b2.style.marginLeft = '8px';
-        ui.appendChild(b2);
-        b2.addEventListener('click', clearAllObjects);
-    }
-    if (!document.getElementById('voidBtn')) {
-    const b3 = document.createElement('button');
-    b3.id = 'voidBtn';
-    b3.textContent = '估算空隙';
-    b3.style.marginLeft = '8px';
-    document.getElementById('ui')?.appendChild(b3);
-    b3.addEventListener('click', showVoidStats);
-    }
-}
-
-addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected(); });
-
-function buildTetrominoMesh(kind, unit, material) {
-    const group = new THREE.Group();
-    const g = new THREE.BoxGeometry(unit, unit, unit);
-    let layout = [];
-    switch (kind) {
-        case 'tI': layout = [[-1.5,0],[ -0.5,0],[ 0.5,0],[ 1.5,0]]; break;
-        case 'tT': layout = [[-1,0],[0,0],[1,0],[0,1]]; break;
-        case 'tZ': layout = [[-1,0],[0,0],[0,1],[1,1]]; break;
-        case 'tL': layout = [[-1,0],[0,0],[1,0],[-1,1]]; break;
-        default:   layout = [[-1,0],[0,0],[1,0],[0,1]];
-    }
-    for (const [gx,gz] of layout) {
-        const cube = new THREE.Mesh(g, material);
-        cube.position.set(gx * unit, 0, gz * unit);
-        group.add(cube);
-    }
-    const box = new THREE.Box3().setFromObject(group);
-    const center = new THREE.Vector3();
-    box.getCenter(center);
-    group.children.forEach(c => {
-        c.position.sub(center);
-    });
-    group.userData.unit = unit;
-    return group;
-}
-
-function updateParamVisibility(type = document.getElementById('shapeType')?.value) {
-    const box    = document.getElementById('boxParams');
-    const sphere = document.getElementById('sphereParams');
-    const custom = document.getElementById('customParams');
-    const hole   = document.getElementById('holeInput');
-    const chk = document.getElementById('hasHole');
-    if (!box || !sphere || !custom || !hole) return;
-
-    const isTet = TETROMINO_TYPES.has(type);
-
-    box.style.display    = (type === 'cube' || isTet) ? 'block' : 'none';
-    sphere.style.display = (type === 'circle') ? 'block' : 'none';
-    custom.style.display = (type === 'lshape') ? 'block' : 'none';
-    
-    const w = document.getElementById('boxWidth');
-    const h = document.getElementById('boxHeight');
-    const d = document.getElementById('boxDepth');
-    if (isTet) {
-        if (w) { w.placeholder = '單位邊長'; w.style.display = 'block'; }
-        if (h) { h.value = ''; h.style.display = 'none'; }
-        if (d) { d.value = ''; d.style.display = 'none'; }
-    } else if (type === 'cube') {
-        if (w) w.style.display = 'block';
-        if (h) h.style.display = 'block';
-        if (d) d.style.display = 'block';
-    }
-    const canHole = !isTet;
-    if (chk) chk.disabled = !canHole;
-    hole.style.display = (!isTet && chk?.checked) ? 'block' : 'none';
-}
-
-function clearFormFields() {
-    [
-        'boxWidth','boxHeight','boxDepth',
-        'sphereWidth',
-        'customWidth',
-        'holeWidth','holeHeight'
-    ].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.value = '';
-    });
-    updateParamVisibility();
-}
-
-function _collectAABBs(root) {
-    const boxes = [];
-    root.updateMatrixWorld(true);
-    root.traverse(n => {
-        if (n.isMesh) {
-            const b = new THREE.Box3().setFromObject(n);
-            boxes.push(b);
-        }
-    });
-    return boxes;
-}
-
-// 取得某物體目前所屬的區域（container / staging）
-function areaOf(o){
-  return getAreaByXZ(o.position.x, o.position.z) || 'container';
-}
-
-function isOverlapping(ncandidate, ignore = null, eps = 1e-3) {
-  const candMeshes = [];
-  ncandidate.updateMatrixWorld(true);
-  ncandidate.traverse(n => { if (n.isMesh) candMeshes.push(n); });
-
-  // 只檢查與「同區域」的物體（暫存區只跟暫存區比，容器只跟容器比）
-  const sameArea = areaOf(ncandidate);
-  for (const obj of objects) {
-    if (obj === ignore) continue;
-    if (areaOf(obj) !== sameArea) continue;  // ★ 關鍵：跨區域不檢查
-
-    const otherMeshes = [];
-    obj.updateMatrixWorld(true);
-    obj.traverse(n => { if (n.isMesh) otherMeshes.push(n); });
-
-    for (const cm of candMeshes) {
-      for (const om of otherMeshes) {
-        const a = new THREE.Box3().setFromObject(cm);
-        const b = new THREE.Box3().setFromObject(om);
-        if (!a.intersectsBox(b)) continue;
-        if (meshesReallyIntersect(cm, om)) return true;
-      }
-    }
-  }
-  return false;
-}
-
-function _cloneForTest(o) {
-  const c = o.clone(true);
-  c.userData = { ...o.userData };
-  return c;
-}
-
-function findRestingY(object) {
-    const clone = _cloneForTest(object);
-    const box = new THREE.Box3().setFromObject(object);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    let y = pallet.position.y + pallet.geometry.parameters.height / 2 + size.y / 2;
-    const maxY = container.position.y + container.geometry.parameters.height / 2 - size.y / 2;
-    while (y <= maxY) {
-        clone.position.y = y;
-        if (!isOverlapping(clone, object)) {
-            return y;
-        }
-        y += 0.5;
-    }
-    return object.position.y;
-}
-
-function getAreaByXZ(x, z) {
-    const cbox = new THREE.Box3().setFromObject(container);
-    if (x >= cbox.min.x && x <= cbox.max.x && z >= cbox.min.z && z <= cbox.max.z) return 'container';
-
-    const halfW = stagingPad.geometry.parameters.width / 2;
-    const halfD = stagingPad.geometry.parameters.depth / 2;
-    const sxmin = stagingPad.position.x - halfW, sxmax = stagingPad.position.x + halfW;
-    const szmin = stagingPad.position.z - halfD, szmax = stagingPad.position.z + halfD;
-    if (x >= sxmin && x <= sxmax && z >= szmin && z <= szmax) return 'staging';
-
-    return null;
-}
-
-function getBoundsForArea(area, half) {
-    if (area === 'container') {
-        const cb = new THREE.Box3().setFromObject(container);
-        const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-        return {
-        minX: cb.min.x + half.x, maxX: cb.max.x - half.x,
-        minZ: cb.min.z + half.z, maxZ: cb.max.z - half.z,
-        minY: palletTop + half.y, maxY: cb.max.y - half.y,
-        baseY: palletTop
-        };
-    } else if (area === 'staging') {
-        const halfW = stagingPad.geometry.parameters.width / 2;
-        const halfD = stagingPad.geometry.parameters.depth / 2;
-        const baseY = stagingPad.position.y + stagingPad.geometry.parameters.height / 2;
-        return {
-        minX: stagingPad.position.x - halfW + half.x,
-        maxX: stagingPad.position.x + halfW - half.x,
-        minZ: stagingPad.position.z - halfD + half.z,
-        maxZ: stagingPad.position.z + halfD - half.z,
-        minY: baseY + half.y,
-        maxY: baseY + stageFrameGeo.parameters.height - half.y,
-        baseY
-        };
-    }
-    const baseY = pallet.position.y + pallet.geometry.parameters.height / 2;
-    return { minX: -Infinity, maxX: Infinity, minZ: -Infinity, maxZ: Infinity, minY: baseY + half.y, maxY: baseY + 200 - half.y, baseY };
-}
-
-function findRestingYForArea(object, area, half) {
-    const { baseY, maxY } = getBoundsForArea(area, half);
-    const clone = _cloneForTest(object);
-    let y = baseY + half.y;
-    while (y <= maxY) {
-        clone.position.set(object.position.x, y, object.position.z);
-        if (!isOverlapping(clone, object)) return y;
-        y += 0.5;
-    }
-    return object.position.y;
-}
-
-/* =====================  模擬退火擺放最佳化  ===================== */
-const VOXEL_RES = 12;
-// 允許在執行中調整能量評分用的體素解析度
-let PACK_VOXEL_RES = VOXEL_RES;
-
-const RIGHT_ANGLES = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
-
-const ENERGY_W_EMPTY     = 1.0;  // 空隙比例
-const ENERGY_W_FRAGMENT  = 0.6; // 空隙破碎度（1 - 最大連通空隙比例）
-
-function uiToast(msg, ms = 1400) {
-    let el = document.getElementById('toast');
-    if (!el) {
-        el = document.createElement('div'); el.id = 'toast';
-        Object.assign(el.style, {
-        position:'fixed', left:'12px', bottom:'12px', padding:'8px 12px',
-        background:'rgba(0,0,0,.75)', color:'#fff', borderRadius:'8px',
-        zIndex:9999, fontFamily:'system-ui, sans-serif'
-        });
-        document.body.appendChild(el);
-    }
-    el.textContent = msg;
-    el.style.display = 'block';
-    clearTimeout(el._h); el._h = setTimeout(()=> el.style.display='none', ms);
-}
-let _viewTween = null;
-function nudgeViewToTarget(targetVec, ms = 200) {
-  const startTarget = controls.target.clone();
-  const startCamPos = camera.position.clone();
-  const delta = new THREE.Vector3().subVectors(targetVec, startTarget);
-  const state = { t: 0 };
-  _viewTween?.stop();
-  _viewTween = new TWEEN.Tween(state)
-    .to({ t: 1 }, ms)
-    .easing(TWEEN.Easing.Quadratic.Out)
-    .onUpdate(() => {
-      const cur = startTarget.clone().addScaledVector(delta, state.t);
-      const cam = startCamPos.clone().addScaledVector(delta, state.t);
-      controls.target.copy(cur);
-      camera.position.copy(cam);
-    })
-    .start();
-}
-
-function computeFollowCenter() {
-  const box = new THREE.Box3();
-  box.expandByObject(container);
-  for (const o of objects) box.expandByObject(o);
-  const c = new THREE.Vector3();
-  box.getCenter(c);
-  return c;
-}
-
-function nudgeViewDuringOptimization(pivotObject = null, ms = 160) {
-  const focus = pivotObject ? pivotObject.getWorldPosition(new THREE.Vector3())
-                            : computeFollowCenter();
-  nudgeViewToTarget(focus, ms);
-}
-
-function packingEnergy() {
-    if (objects.length === 0) return 0;
-
-    const cb = new THREE.Box3().setFromObject(container);
-    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-
-    const min = new THREE.Vector3(cb.min.x, palletTop, cb.min.z);
-  const max = new THREE.Vector3(cb.max.x, cb.max.y, cb.max.z);
-  const nx = PACK_VOXEL_RES, ny = PACK_VOXEL_RES, nz = PACK_VOXEL_RES;
-  const dx = (max.x - min.x) / nx;
-  const dy = (max.y - min.y) / ny;
-  const dz = (max.z - min.z) / nz;
-  const total = nx * ny * nz;
-  if (total <= 0) return 0;
-  const boxes = objects.map(o => new THREE.Box3().setFromObject(o));
-  const grid = new Uint8Array(total);   // 1 = 佔用；0 = 空
-  const p = new THREE.Vector3();
-  let emptyCount = 0;
-  const toIndex = (i, j, k) => (j * nz + k) * nx + i;
-
-  for (let j = 0; j < ny; j++) {
-    const y = min.y + (j + 0.5) * dy;
-    for (let k = 0; k < nz; k++) {
-      const z = min.z + (k + 0.5) * dz;
-      for (let i = 0; i < nx; i++) {
-        const x = min.x + (i + 0.5) * dx;
-        p.set(x, y, z);
-        let occ = false;
-        for (let b = 0; b < boxes.length && !occ; b++) {
-          if (boxes[b].containsPoint(p)) occ = true;
-        }
-        const id = toIndex(i, j, k);
-        grid[id] = occ ? 1 : 0;
-        if (!occ) emptyCount++;
-      }
-    }
-  }
-  if (emptyCount === 0) return 0; // 沒空隙 = 最佳
-  
-  const visited = new Uint8Array(total);
-  const q = new Uint32Array(total);
-  let largest = 0;
-
-  for (let j = 0; j < ny; j++) {
-    for (let k = 0; k < nz; k++) {
-      for (let i = 0; i < nx; i++) {
-        const start = toIndex(i, j, k);
-        if (grid[start] !== 0 || visited[start]) continue;
-
-        // BFS
-        let head = 0, tail = 0, size = 0;
-        visited[start] = 1;
-        q[tail++] = start;
-        while (head < tail) {
-          const cur = q[head++]; size++;
-          const ii = cur % nx;
-          const jk = (cur - ii) / nx;
-          const kk = jk % nz;
-          const jj = (jk - kk) / nz;
-
-          // 6-neighbors
-          // x-1
-          if (ii > 0) {
-            const nid = cur - 1;
-            if (!visited[nid] && grid[nid] === 0) { visited[nid] = 1; q[tail++] = nid; }
-          }
-          // x+1
-          if (ii < nx - 1) {
-            const nid = cur + 1;
-            if (!visited[nid] && grid[nid] === 0) { visited[nid] = 1; q[tail++] = nid; }
-          }
-          // z-1
-          if (kk > 0) {
-            const nid = cur - nx;
-            if (!visited[nid] && grid[nid] === 0) { visited[nid] = 1; q[tail++] = nid; }
-          }
-          // z+1
-          if (kk < nz - 1) {
-            const nid = cur + nx;
-            if (!visited[nid] && grid[nid] === 0) { visited[nid] = 1; q[tail++] = nid; }
-          }
-          // y-1
-          if (jj > 0) {
-            const nid = cur - nx * nz;
-            if (!visited[nid] && grid[nid] === 0) { visited[nid] = 1; q[tail++] = nid; }
-          }
-          // y+1
-          if (jj < ny - 1) {
-            const nid = cur + nx * nz;
-            if (!visited[nid] && grid[nid] === 0) { visited[nid] = 1; q[tail++] = nid; }
-          }
-        }
-        if (size > largest) largest = size;
-      }
-    }
-  }
-
-  const emptyRatio = emptyCount / total;           // 空隙比例（越小越好）
-  const largestVoidRatio = largest / emptyCount;   // 最大連通空隙占比（越大越好）
-
-  // 綜合能量（越小越佳）
-  return ENERGY_W_EMPTY * emptyRatio +
-         ENERGY_W_FRAGMENT * (1 - largestVoidRatio);
-}
-
-function snapshotState() {
-    return objects.map(o => ({
-        obj: o,
-        pos: o.position.clone(),
-        rot: o.rotation.clone(),
-    }));
-}
-
-function restoreState(snap) {
-    snap.forEach(s => { s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); });
-}
-
-function boundsForObjectXZ(obj) {
-    const cb = new THREE.Box3().setFromObject(container);
-    const b  = new THREE.Box3().setFromObject(obj);
-    const sz = new THREE.Vector3(); b.getSize(sz);
-    const halfX = sz.x * 0.5, halfZ = sz.z * 0.5;
-
-    return {
-        minX: cb.min.x + halfX,
-        maxX: cb.max.x - halfX,
-        minZ: cb.min.z + halfZ,
-        maxZ: cb.max.z - halfZ,
-    };
-}
-
-function tryPerturbOne(obj, linStep) {
-  const before = { pos: obj.position.clone(), rot: obj.rotation.clone() };
-  const mode = Math.random();
-
-  if (mode < 0.6) {
-    const b = boundsForObjectXZ(obj);
-    const s = Math.max(0.5, obj.userData?.unit || linStep || 2);
-    const dx = (Math.random()<0.5?-1:1) * s;
-    const dz = (Math.random()<0.5?-1:1) * s;
-    obj.position.x = THREE.MathUtils.clamp(obj.position.x + dx, b.minX, b.maxX);
-    obj.position.z = THREE.MathUtils.clamp(obj.position.z + dz, b.minZ, b.maxZ);
-  } else {
-    const curY = obj.rotation.y;
-    const ny = RIGHT_ANGLES[(RIGHT_ANGLES.findIndex(a=>Math.abs(a-curY)% (Math.PI*2)<1e-6)+ (Math.random()<0.5?-1:1) + RIGHT_ANGLES.length)%RIGHT_ANGLES.length];
-    obj.rotation.set(0, ny, 0);
-  }
-
-  obj.position.y = findRestingY(obj);
-
-  const b2 = boundsForObjectXZ(obj);
-  const inside =
-    obj.position.x >= b2.minX - 1e-3 && obj.position.x <= b2.maxX + 1e-3 &&
-    obj.position.z >= b2.minZ - 1e-3 && obj.position.z <= b2.maxZ + 1e-3;
-
-  if (!inside || isOverlapping(obj, obj)) {
-    obj.position.copy(before.pos);
-    obj.rotation.copy(before.rot);
-    return { applied:false };
-  }
-  return { applied:true, undo:()=>{ obj.position.copy(before.pos); obj.rotation.copy(before.rot);} };
-}
-
-function tryBestAxisOrientation_Y(obj){
-  const beforePos = obj.position.clone(), beforeRot = obj.rotation.clone();
-  let best = { energy: Infinity, rot: beforeRot.clone(), pos: beforePos.clone() };
-  const eBase = packingEnergy();
-
-  for (const ay of RIGHT_ANGLES) {
-    obj.rotation.set(0, ay, 0);
-    const b = boundsForObjectXZ(obj);
-    obj.position.x = THREE.MathUtils.clamp(obj.position.x, b.minX, b.maxX);
-    obj.position.z = THREE.MathUtils.clamp(obj.position.z, b.minZ, b.maxZ);
-    obj.position.y = findRestingY(obj);
-    if (isOverlapping(obj, obj)) continue;
-    const e = packingEnergy();
-    if (e < best.energy) best = { energy:e, rot: obj.rotation.clone(), pos: obj.position.clone() };
-  }
-  if (best.energy + 1e-9 < eBase) { obj.rotation.copy(best.rot); obj.position.copy(best.pos); return true; }
-  obj.rotation.copy(beforeRot); obj.position.copy(beforePos); return false;
-}
-
-function anchorScore(obj) {
-  const cb = new THREE.Box3().setFromObject(container);
-  const b  = new THREE.Box3().setFromObject(obj);
-  return (b.min.x - cb.min.x) + (b.min.z - cb.min.z) + 0.25 * Math.max(0, b.min.y - (pallet.position.y + pallet.geometry.parameters.height / 2));
-}
-
-function globalCompaction(passes = 3) {
-  const stepFor = (o) => Math.max(0.5, o.userData?.unit || 2);
-  for (let t = 0; t < passes; t++) {
-    const order = objects.slice().sort(() => Math.random() - 0.5);
-    for (const o of order) {
-      o.position.y = findRestingY(o);
-      let improved = true;
-      while (improved) {
-        improved = false;
-        const e0 = packingEnergy();
-        const s  = stepFor(o);
-        const b  = boundsForObjectXZ(o);
-        const tryMove = (dx, dz) => {
-          const oldPos = o.position.clone();               
-          const oldScore = anchorScore(o);
-          o.position.x = THREE.MathUtils.clamp(o.position.x + dx * s, b.minX, b.maxX);
-          o.position.z = THREE.MathUtils.clamp(o.position.z + dz * s, b.minZ, b.maxZ);
-          o.position.y = findRestingY(o);
-
-          if (!isOverlapping(o, o)) {
-            const e1 = packingEnergy();
-            if (e1 < e0 - 1e-6) { improved = true; return true; }
-            nudgeViewDuringOptimization(o, 140);
-            if (Math.abs(e1 - e0) < 1e-6) {
-            const newScore = anchorScore(o);          
-              if (newScore < oldScore - 1e-6) { improved = true; return true; }
-              nudgeViewDuringOptimization(o, 140);
-            }
-      }
-      o.position.copy(oldPos);
-      return false;
-    };
-        tryMove( 1, 0) || tryMove(-1, 0) || tryMove(0,  1) || tryMove(0, -1);
-      }
-    }
-  }
-}
-
-function ensureInScene(o){
-  if (!o.parent) scene.add(o);
-  if (!objects.includes(o)) objects.push(o);
-}
-
-// === 🔹 小畫面 UI（最佳化進行中） ===
+// 最佳化小面板
 function ensureOptimizePanel() {
   let p = document.getElementById('optimizePanel');
   if (p) return p;
@@ -1558,7 +125,7 @@ function ensureOptimizePanel() {
   p = document.createElement('div');
   p.id = 'optimizePanel';
   Object.assign(p.style, {
-    position: 'fixed', left: '12px', top: '12px',
+    position: 'fixed', right: '12px', top: '12px',
     width: '260px', background: 'rgba(0,0,0,.65)',
     color: '#fff', padding: '10px 12px', borderRadius: '10px',
     fontFamily: 'system-ui, sans-serif', zIndex: 9999, display: 'none'
@@ -1592,7 +159,7 @@ function ensureOptimizePanel() {
   document.getElementById('optStopBtn').addEventListener('click', () => stopAnnealing());
   return p;
 }
-function showOptimizePanel(show=true){ const p = ensureOptimizePanel(); p.style.display = show?'block':'none'; }
+function showOptimizePanel(show=true){ const p = ensureOptimizePanel(); p.style.display = show?'block':'none'; placeOptimizePanelBelowChart(); }
 function updateOptimizePanel({step=0,total=0,subtitle='',emptyPct=null} = {}) {
   ensureOptimizePanel();
   if (subtitle) document.getElementById('optSub').textContent = subtitle;
@@ -1606,354 +173,908 @@ function updateOptimizePanel({step=0,total=0,subtitle='',emptyPct=null} = {}) {
   }
 }
 
-function rescueToStaging(mesh){
-  try{
-    // 優先用演算法塞暫存區；保底直接丟到中心上方
-    if (!placeInStaging(mesh)) {
-      const b = getBoundsForArea('staging', new THREE.Vector3(1,1,1));
-      mesh.position.set(stagingPad.position.x, b.minY, stagingPad.position.z);
-      ensureInScene(mesh);
-    }
-  } catch(e){
-    console.warn('rescueToStaging 失敗', e);
-    ensureInScene(mesh);
-  }
-}
-
-function resetPose(mesh) {
-  mesh.rotation.set(0, 0, 0);
-  mesh.position.set(0, 0, 0);
-  mesh.updateMatrixWorld(true);
-}
-
-function dedupeObjects() {
-  const seen = new Set();
-  for (let i = objects.length - 1; i >= 0; i--) {
-    const o = objects[i];
-    if (seen.has(o)) objects.splice(i, 1);
-    else seen.add(o);
-  }
-}
-
-// 在 autoPackMaxUtilization 開頭加：
-dedupeObjects();
-
-async function autoPackMaxUtilization(options = {}) {
-  if (annealRunning) { uiToast('請先停止正在進行的最佳化'); return; }
-
-  for (const o of objects) { 
-    o.visible = true; 
-    ensureInScene(o);
-  }
-  const bigRatio    = options.bigRatio   ?? 0.6;   // 前 60% 體積視為大件
-  const fineFactor  = options.fineFactor ?? 0.5;   // 小件步距縮小到 50%
-  const ultraFactor = options.ultraFactor?? 0.33;  // 再更細一輪
-  uiToast('開始最大化擺放（先大後小）');
-
-  // 依「真實體積」由大到小排序（不移除場景）
-  const ranked = objects.slice()
-    .map(o => ({ o, vol: worldVolumeOfObject(o) }))
-    .sort((a,b)=> b.vol - a.vol)
-    .map(x=>x.o);
-
-  const cut   = Math.max(1, Math.round(ranked.length * bigRatio));
-  const big   = ranked.slice(0, cut);
-  const small = ranked.slice(cut);
-
-  // === 大物件：快速放進藍色容器（速度優先，不計能量） ===
-  FAST_PACKING = true;
-  for (const m of big) {
-    resetPose(m);
-    /* ensureInScene(m); */ // 先確保存在 scene/objects
-    const ok = placeInsideContainer(m, { stepScale: 1.0, padding: 0.05, angles: RIGHT_ANGLES });
-    if (!ok) rescueToStaging(m);
-    await uiYield();
-  }
-
-  // === 小物件：細掃描 + 能量評分，填縫 ===
-  FAST_PACKING = false;
-  for (const m of small) {
-    resetPose(m);
-    /* ensureInScene(m); */
-    let ok = placeInsideContainer(m, { stepScale: fineFactor,  padding: 0.02, angles: RIGHT_ANGLES });
-    if (!ok) ok = placeInsideContainer(m, { stepScale: ultraFactor, padding: 0.02, angles: RIGHT_ANGLES });
-    if (!ok) rescueToStaging(m);
-    await uiYield();
-  }
-
-  // 壓實 + 退火
-  globalCompaction(2);
-  await runAnnealing({ steps: options.steps ?? 9000, initTemp: 90, cooling: 0.997, baseStep: 3, baseAngle: Math.PI/18 });
-
-  const r = measureBlueVoid();
-  uiToast(`完成：利用率 ${(100 - r.emptyRatio * 100).toFixed(1)}%`);
-  renderVoidHUD();
-}
-
-let annealRunning = false;
-
-// === 🔹 最佳化流程（整合修正版） ===
-/* async function runAnnealing(opts = {}) {
-  if (objects.length === 0) { uiToast('目前沒有物體可最佳化'); return; }
-  if (annealRunning) { uiToast('最佳化已在進行中'); return; }
-
-  annealRunning = true;
-  placementTimeline = [];
-  showLoadingSpinner(true);
-  ConvergenceChart.start();
-
-  const steps = opts.steps ?? 10000;
-  const initTemp = opts.initTemp ?? 120;
-  const cooling = opts.cooling ?? 0.997;
-  const baseStep = opts.baseStep ?? 4;
-
-  uiToast('開始最佳化擺放');
-  let bestSnap = snapshotState();
-  let bestEnergy = packingEnergy();
-  let T = initTemp;
-
-  renderer.setAnimationLoop(null);
-
-  for (let s = 0; s < steps && annealRunning; s++) {
-    const obj = objects[Math.floor(Math.random() * objects.length)];
-    const step = obj.userData?.unit || baseStep;
-    const e0 = packingEnergy();
-    let trial = { applied: false };
-
-    // 隨機嘗試移動／旋轉（最多嘗試 60 次）
-    for (let k = 0; k < 60 && !trial.applied; k++) {
-      const backupPos = obj.position.clone();
-      const backupRot = obj.rotation.clone();
-
-      // 嘗試隨機微移與旋轉
-      obj.position.x += (Math.random() - 0.5) * step;
-      obj.position.y += (Math.random() - 0.5) * step;
-      obj.position.z += (Math.random() - 0.5) * step;
-      obj.rotation.x += (Math.random() - 0.5) * 0.1;
-      obj.rotation.y += (Math.random() - 0.5) * 0.1;
-      obj.rotation.z += (Math.random() - 0.5) * 0.1;
-
-      // 🚫 若發生重疊 → 撤回、繼續嘗試
-      if (anyOverlap(obj, objects)) {
-        obj.position.copy(backupPos);
-        obj.rotation.copy(backupRot);
-        continue;
-      }
-
-      trial.applied = true;
-      trial.undo = () => {
-        obj.position.copy(backupPos);
-        obj.rotation.copy(backupRot);
-      };
-    }
-
-    if (!trial.applied) { T *= cooling; continue; }
-
-    const e1 = packingEnergy();
-    const dE = e1 - e0;
-    const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
-
-    if (accept) {
-      if (e1 < bestEnergy) {
-        bestEnergy = e1;
-        bestSnap = snapshotState();
-      }
-      placementTimeline.push(snapshotState());
-    } else {
-      trial.undo && trial.undo();
-    }
-
-    T *= cooling;
-    if (s % 80 === 0) await new Promise(r => requestAnimationFrame(r));
-  }
-
-  showLoadingSpinner(false);
-  annealRunning = false;
-  ConvergenceChart.stop();
-
-  await playPlacementTimeline();
-
-  restoreState(bestSnap);
-  globalCompaction(2);
-  renderVoidHUD();
-
-  const eff = computePackingEfficiencyCSG(containerBox);
-  uiToast(`最佳化完成（無重疊），空隙率 ${(100 - eff).toFixed(2)}%`);
-
-  setTimeout(() => {
-    renderer.setAnimationLoop((time) => {
-      controls.update();
-      TWEEN.update(time);
-      renderer.render(scene, camera);
+// 收斂曲線（右上角）
+const ConvergenceChart = (() => {
+  const S = { el:null, cvs:null, ctx:null, data:[], start:0, raf:0, maxPts:600, running:false, w:280, h:140 };
+  function ensureUI() {
+    if (S.el) return;
+    const el = document.createElement('div');
+    el.id = 'convChart';
+    Object.assign(el.style, {
+      position:'fixed', right:'12px', top:'12px', zIndex:9998,
+      background:'rgba(0,0,0,.55)', borderRadius:'10px',
+      padding:'8px', color:'#fff', fontFamily:'system-ui,sans-serif',
+      userSelect:'none', pointerEvents:'none'
     });
-  }, 200);
-} */
-// === 🔹 最佳化流程（顯示小畫面＋錄影回放） ===
-async function runAnnealing(opts = {}) {
-  if (objects.length === 0) { uiToast('目前沒有物體可最佳化'); return; }
-  if (annealRunning) { uiToast('最佳化已在進行中'); return; }
+    const title = document.createElement('div');
+    title.textContent = '收斂曲線（空隙 %）';
+    Object.assign(title.style, { fontSize:'12px', opacity:.9, marginBottom:'4px' });
 
-  annealRunning = true;
+    const cvs = document.createElement('canvas');
+    cvs.width = S.w; cvs.height = S.h; cvs.style.display = 'block';
 
-  // 錄製參數：抽樣存幀，避免記憶體暴衝
-  placementTimeline = [];
-  const TIMELINE_SAMPLE_EVERY = 10;    // 每接受 10 次變更存 1 幀
-  const TIMELINE_MAX_FRAMES   = 1200;  // 最多 1200 幀
-  let acceptedCount = 0;
+    el.appendChild(title); el.appendChild(cvs); document.body.appendChild(el);
+    S.el = el; S.cvs = cvs; S.ctx = cvs.getContext('2d'); fitDPR(); addEventListener('resize', fitDPR);
+  }
+  function fitDPR(){ if (!S.cvs) return; const dpr = Math.min(window.devicePixelRatio||1,2); S.cvs.width=Math.round(S.w*dpr); S.cvs.height=Math.round(S.h*dpr); S.cvs.style.width=S.w+'px'; S.cvs.style.height=S.h+'px'; }
+  function pushPoint(){ const r = measureBlueVoid(); const y = Math.max(0, Math.min(100, r.emptyRatio*100)); const t=(performance.now()-S.start)/1000; S.data.push({t,y}); if (S.data.length>S.maxPts) S.data.shift(); }
+  function yToPix(y){ const p=S.cvs.height/(Math.min(window.devicePixelRatio||1,2)); return Math.round((1 - y/100) * (p - 18) + 6); }
+  function xToPix(i){ const dpr=Math.min(window.devicePixelRatio||1,2); const w=S.w; const n=Math.max(1,S.data.length-1); return Math.round((i/n)*(w-16)+8)*dpr; }
+  function draw(){
+    const dpr=Math.min(window.devicePixelRatio||1,2); const ctx=S.ctx; if (!ctx) return;
+    ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,S.w,S.h);
+    ctx.strokeStyle='rgba(255,255,255,.25)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(32,6); ctx.lineTo(32,S.h-14); ctx.lineTo(S.w-6,S.h-14); ctx.stroke();
+    ctx.fillStyle='rgba(255,255,255,.7)'; ctx.font='10px system-ui';
+    [0,25,50,75,100].forEach(v=>{ const y=yToPix(v); ctx.fillText(String(v),6,y+3); ctx.strokeStyle='rgba(255,255,255,.12)'; ctx.beginPath(); ctx.moveTo(32,y); ctx.lineTo(S.w-6,y); ctx.stroke(); });
+    if (S.data.length<2) return;
+    ctx.save(); ctx.beginPath();
+    for (let i=0;i<S.data.length;i++){ const px=xToPix(i)/dpr; const py=yToPix(S.data[i].y); if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py); }
+    ctx.lineWidth=2; ctx.strokeStyle='#5ad3ff'; ctx.stroke(); ctx.restore();
+    const latest=S.data[S.data.length-1].y; ctx.fillStyle='#fff'; ctx.font='11px system-ui'; ctx.fillText(`${latest.toFixed(1)}%`, S.w-52, S.h-22);
+  }
+  function loop(){ if (!S.running) return; if (!S._last || performance.now()-S._last>300){ S._last=performance.now(); pushPoint(); draw(); } S.raf=requestAnimationFrame(loop); }
+  function start(){ ensureUI(); S.data=[]; S.start=performance.now(); S.running=true; S._last=0; cancelAnimationFrame(S.raf); loop(); }
+  function stop(){ S.running=false; cancelAnimationFrame(S.raf); pushPoint(); draw(); }
+  return { start, stop, draw };
+})();
 
-  // UI：開啟小畫面 + 收斂圖 + 轉圈
-  showLoadingSpinner(true);
-  showOptimizePanel(true);
-  updateOptimizePanel({ subtitle:'計算初始能量…' });
-  ConvergenceChart.start();
+// 讓最佳化小面板放在折線圖之下
+function placeOptimizePanelBelowChart(){
+  const p = document.getElementById('optimizePanel');
+  if (!p) return;
+  const c = document.getElementById('convChart');
+  Object.assign(p.style, { position:'fixed', right:'12px' });
+  const topPx = c ? (c.getBoundingClientRect().bottom + 12) : 12;
+  p.style.top = `${topPx}px`;
+}
+window.addEventListener('resize', placeOptimizePanelBelowChart);
 
-  // 參數
-  const steps    = opts.steps    ?? 10000;
-  const initTemp = opts.initTemp ?? 120;
-  const cooling  = opts.cooling  ?? 0.997;
-  const baseStep = opts.baseStep ?? 4;
+/* =========================================================
+   場景初始化
+========================================================= */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
 
-  // 為了不卡畫面
-  const slice = makeTimeSlicer(12);
+camera.position.set(150, 150, 150);
+camera.lookAt(0, 45, 0);
 
-  // 期間：改用輕量度量（避免 CSG）
-  const prevLight = LIGHTWEIGHT_METRICS;
-  LIGHTWEIGHT_METRICS = true;
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.maxPolarAngle = Math.PI / 2;
+controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+controls.mouseButtons.RIGHT = null;
 
-  uiToast('開始最佳化擺放');
-  let bestSnap   = snapshotState();
-  let bestEnergy = packingEnergy();
-  let T = initTemp;
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const light = new THREE.DirectionalLight(0xffffff, 1);
+light.position.set(50, 50, 100);
+scene.add(light);
 
-  // ✨ 保持 render loop 繼續（不要停掉）
-  // renderer.setAnimationLoop(null); // ← 移除/不要呼叫，避免畫面停住
+// 托盤
+const palletGeometry = new THREE.BoxGeometry(110, 10, 110);
+const palletMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
+const pallet = new THREE.Mesh(palletGeometry, palletMaterial);
+pallet.position.y = -5;
+scene.add(pallet);
 
-  for (let s = 0; s < steps && annealRunning; s++) {
-    await slice();                           // 🔸 定期讓出主執行緒
-    if ((s & 63) === 0) {                    // 大約每 64 步更新一次小畫面
-      const r = measureBlueVoid();
-      updateOptimizePanel({
-        step: s, total: steps,
-        subtitle: `退火中（T=${T.toFixed(1)}）`,
-        emptyPct: r.emptyRatio * 100
-      });
+// 藍色容器（置中於托盤上）
+const containerGeometry = new THREE.BoxGeometry(110, 110, 110);
+const containerMaterial = new THREE.MeshStandardMaterial({
+  color: 0x00ffff, transparent: true, opacity: 0.4, side: THREE.DoubleSide
+});
+const container = new THREE.Mesh(containerGeometry, containerMaterial);
+function centerContainerOnPallet() {
+  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+  const ch = containerGeometry.parameters.height;
+  container.position.set(0, palletTop + ch / 2, 0);
+}
+centerContainerOnPallet();
+const containerEdges = new THREE.LineSegments(
+  new THREE.EdgesGeometry(containerGeometry),
+  new THREE.LineBasicMaterial({ color: 0x00ffff })
+);
+container.add(containerEdges);
+scene.add(container);
+
+// 紅色暫存區
+const stagingSize = 220;
+const stagingPad = new THREE.Mesh(new THREE.BoxGeometry(stagingSize, 8, stagingSize), new THREE.MeshBasicMaterial({ color: 0x777777 }));
+const containerWidth = containerGeometry.parameters.width;
+stagingPad.position.set(container.position.x + containerWidth / 2 + stagingSize / 2 + 20, -5, container.position.z);
+scene.add(stagingPad);
+
+const stageFrameGeo = new THREE.BoxGeometry(stagingSize, 220, stagingSize);
+const stageFrameMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent : true, opacity : 0.15, side : THREE.DoubleSide });
+const stagingFrame = new THREE.Mesh(stageFrameGeo, stageFrameMat);
+stagingFrame.position.set(
+  stagingPad.position.x,
+  stagingPad.position.y + stagingPad.geometry.parameters.height/2 + stageFrameGeo.parameters.height/2,
+  stagingPad.position.z
+);
+stagingFrame.add(new THREE.LineSegments(
+  new THREE.EdgesGeometry(stageFrameGeo),
+  new THREE.LineBasicMaterial({ color: 0x00ffff })
+));
+scene.add(stagingFrame);
+
+/* =========================================================
+   資料/工具：Library、Volume、CSG、OBB…
+========================================================= */
+function typeLabel(t) {
+  switch (t) {
+    case 'tI': return 'I 形方塊';
+    case 'tT': return 'T 形方塊';
+    case 'tZ': return 'Z 形方塊';
+    case 'tL': return 'L 形方塊';
+    case 'cube': return '立方體';
+    case 'circle': return '球體';
+    case 'lshape': return '不規則';
+    default: return t;
+  }
+}
+function getLibrarySafe() {
+  let arr;
+  try { arr = JSON.parse(localStorage.getItem(LIB_KEY) || '[]'); return Array.isArray(arr)?arr:[]; }
+  catch { return []; }
+}
+const library = getLibrarySafe();
+function saveLibrary(){ try{ localStorage.setItem(LIB_KEY, JSON.stringify(library)); }catch(e){ console.warn('localStorage 寫入失敗:', e);} }
+function summarize(item){
+  const { type, width, height, depth, color, hasHole, holeWidth, holeHeight } = item;
+  const typeName = typeLabel(type);
+  const size = (type === 'circle') ? `${width}` :
+               (TETROMINO_TYPES.has(type) ? `單位=${width}` :
+               `${width}×${height}×${depth}`);
+  const hole = hasHole ? `孔 ${holeWidth ?? 0}×${holeHeight ?? 0}` : '無孔';
+  return { title: `${typeName} / ${size}`, hole, color };
+}
+function renderLibrary() {
+  const list = document.getElementById('libraryList'); if (!list) return;
+  if (!Array.isArray(library) || library.length === 0) {
+    list.innerHTML = `<div style="color:#666;font-size:12px;line-height:1.6;">
+    （清單目前沒有項目）<br>・按「辨識參數」後會自動加入<br>・或用上方表單產生後也會加入</div>`;
+    return;
+  }
+  list.innerHTML = library.map((p, i) => {
+    const { title, hole, color } = summarize(p);
+    return `<div class="item" data-index="${i}">
+      <div><strong>${title}</strong></div>
+      <div class="row"><span class="chip" style="background:${color}"></span><span>${hole}</span></div>
+      <button class="btn use-item" data-index="${i}">放到場景</button>
+    </div>`;
+  }).join('');
+}
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('.use-item');
+  if (!btn) return;
+  const idx = +btn.dataset.index;
+  const item = library[idx];
+  if (!item) return;
+  createCube(item.type, item.width, item.height, item.depth, item.color, item.hasHole, item.holeWidth, item.holeHeight, item.holeType, item.holeAxis);
+});
+function addToLibrary(params) {
+  const n=(v,d)=> (Number.isFinite(+v)? +v : d);
+  const t=params.type||'cube';
+  const isTet=TETROMINO_TYPES.has(t);
+  const hasHoleClean = isTet?false:!!params.hasHole;
+  const clean = {
+    type:t,
+    width:n(params.width,20),
+    height:n(params.height, isTet?params.width:(t==='circle'?params.width:20)),
+    depth:n(params.depth, isTet?params.width:(t==='circle'?params.width:20)),
+    color:params.color||'#00ff00',
+    hasHole:hasHoleClean,
+    holeWidth:n(params.holeWidth,10),
+    holeHeight:n(params.holeHeight,10),
+    holeType:params.holeType || defaultHoleTypeByShape(t, hasHoleClean),
+    holeAxis:(params.holeAxis||'z').toLowerCase()
+  };
+  library.unshift(clean); library.splice(60); saveLibrary(); renderLibrary();
+}
+function normalizeColor(input) {
+  const map = {"紅色":"#ff0000","綠色":"#00ff00","藍色":"#0000ff","黃色":"#ffff00","紫色":"#800080","黑色":"#000000","白色":"#ffffff","橘色":"#ffa500","灰色":"#808080","粉紅色":"#ffc0cb"};
+  if (!input) return '#00ff00'; if (input.startsWith('#')) return input;
+  const hex = map[input.trim()]; return hex && /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#00ff00';
+}
+
+function toCSGReady(mesh){
+  mesh.updateMatrixWorld(true);
+  const g=mesh.geometry; const gi=g.index?g.toNonIndexed():g.clone();
+  gi.computeVertexNormals();
+  const m=new THREE.Mesh(gi, mesh.material);
+  m.position.copy(mesh.position); m.quaternion.copy(mesh.quaternion); m.scale.copy(mesh.scale); m.updateMatrix();
+  return m;
+}
+function _meshWorldVolume(mesh){
+  const g=mesh.geometry; if (!g||!g.attributes?.position) return 0;
+  mesh.updateMatrixWorld(true);
+  const m4=mesh.matrixWorld,pos=g.attributes.position,idx=g.index?g.index.array:null;
+  const v0=new THREE.Vector3(), v1=new THREE.Vector3(), v2=new THREE.Vector3();
+  const t1=new THREE.Vector3(), t2=new THREE.Vector3(); let vol=0;
+  const add=()=>{ t1.copy(v1).sub(v0); t2.copy(v2).sub(v0); vol+=v0.dot(t1.cross(t2))/6; };
+  if (idx) for (let i=0;i<idx.length;i+=3){ v0.fromBufferAttribute(pos,idx[i]).applyMatrix4(m4);
+    v1.fromBufferAttribute(pos,idx[i+1]).applyMatrix4(m4);
+    v2.fromBufferAttribute(pos,idx[i+2]).applyMatrix4(m4); add(); }
+  else for (let i=0;i<pos.count;i+=3){ v0.fromBufferAttribute(pos,i).applyMatrix4(m4);
+    v1.fromBufferAttribute(pos,i+1).applyMatrix4(m4);
+    v2.fromBufferAttribute(pos,i+2).applyMatrix4(m4); add(); }
+  return Math.abs(vol);
+}
+function worldVolumeOfObject(root){ let sum=0; root.updateMatrixWorld(true); root.traverse(n=>{ if(n.isMesh) sum+=_meshWorldVolume(n); }); return sum; }
+
+/* =========================================================
+   藍箱內部空隙估算（CSG 優先，否則回退）
+========================================================= */
+function makeContainerInteriorMesh() {
+  const cb = new THREE.Box3().setFromObject(container);
+  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+  const w = cb.max.x - cb.min.x, h = cb.max.y - palletTop, d = cb.max.z - cb.min.z;
+  if (h <= 0) return null;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshBasicMaterial());
+  m.position.set((cb.min.x+cb.max.x)/2, palletTop + h/2, (cb.min.z+cb.max.z)/2);
+  m.updateMatrixWorld(true);
+  return m;
+}
+function ensureVoidHUD() {
+  let el = document.getElementById('voidHud');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'voidHud';
+  Object.assign(el.style, {
+    position: 'fixed', right: '12px', bottom: '12px',
+    background: 'rgba(0,0,0,.65)', color: '#fff',
+    padding: '8px 10px', borderRadius: '8px',
+    fontFamily: 'system-ui, sans-serif', fontSize: '12px',
+    zIndex: 9999
+  });
+  document.body.appendChild(el);
+  return el;
+}
+// ⭐ HUD：走輕量 + 節流
+function renderVoidHUD() {
+  const now = performance.now();
+  if (now < _hudNext) return;
+  _hudNext = now + HUD_THROTTLE_MS;
+
+  const prev = LIGHTWEIGHT_METRICS;
+  if (HUD_LIGHTWEIGHT) LIGHTWEIGHT_METRICS = true;
+  const r = measureBlueVoid();
+  LIGHTWEIGHT_METRICS = prev;
+
+  const hud = ensureVoidHUD();
+  hud.textContent = `空隙 ${ (r.emptyRatio*100).toFixed(1) }%`;
+}
+function showVoidStats() {
+  const prev = LIGHTWEIGHT_METRICS;
+  LIGHTWEIGHT_METRICS = false; // 單次精準
+  const r = measureBlueVoid();
+  LIGHTWEIGHT_METRICS = prev;
+  const msg = `空隙 ${(r.emptyRatio*100).toFixed(1)}%`;
+  console.log('[Blue-Container Void]', r, msg);
+  uiToast(msg, 2200);
+  renderVoidHUD();
+}
+
+function _interiorMeshSolid() {
+  const cb = new THREE.Box3().setFromObject(container);
+  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+  const w = cb.max.x - cb.min.x, h = cb.max.y - palletTop, d = cb.max.z - cb.min.z;
+  if (h <= 0) return null;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial());
+  m.position.set((cb.min.x + cb.max.x)/2, palletTop + h/2, (cb.min.z + cb.max.z)/2);
+  m.updateMatrixWorld(true);
+  return m;
+}
+function _clipToInteriorCSG(obj, interiorMesh) {
+  try {
+    const a = new THREE.Box3().setFromObject(obj);
+    const b = new THREE.Box3().setFromObject(interiorMesh);
+    if (!a.intersectsBox(b)) return null;
+
+    const parts = [];
+    obj.updateMatrixWorld(true);
+    obj.traverse(n => { if (n.isMesh && n.geometry) parts.push(toCSGReady(n)); });
+    if (!parts.length) return null;
+
+    let acc = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      try { acc = CSG.union(acc, parts[i]); } catch {}
     }
+    const clipped = CSG.intersect(acc, toCSGReady(interiorMesh));
+    clipped.updateMatrixWorld(true);
+    return clipped;
+  } catch { return null; }
+}
+function _batchUnion(meshes) {
+  if (!meshes.length) return null;
+  let current = meshes[0];
+  for (let i = 1; i < meshes.length; i++) {
+    try { current = CSG.union(current, meshes[i]); }
+    catch {
+      const batch = [];
+      for (let k = i; k < Math.min(meshes.length, i + CSG_MAX_BATCH); k++) batch.push(meshes[k]);
+      try {
+        let bacc = batch[0];
+        for (let t = 1; t < batch.length; t++) bacc = CSG.union(bacc, batch[t]);
+        current = CSG.union(current, bacc);
+        i += (batch.length - 1);
+      } catch {}
+    }
+  }
+  current.updateMatrixWorld(true);
+  return current;
+}
+function _solidVolumeViaCSG() {
+  const interior = _interiorMeshSolid();
+  if (!interior) return null;
 
-    const obj  = objects[Math.floor(Math.random() * objects.length)];
-    const step = obj.userData?.unit || baseStep;
-    const e0   = packingEnergy();
+  const inside = [];
+  for (const o of objects) {
+    if (USE_ONLY_CONTAINER && areaOf(o) !== 'container') continue;
+    const clipped = _clipToInteriorCSG(o, interior);
+    if (clipped) inside.push(clipped);
+  }
+  const containerVol = _meshWorldVolume(toCSGReady(interior));
+  if (!inside.length) return { containerVolume: containerVol, solidVolume: 0 };
 
-    // 嘗試微擾
-    let applied = false;
-    const backupPos = obj.position.clone();
-    const backupRot = obj.rotation.clone();
+  const merged = _batchUnion(inside);
+  if (!merged) return null;
 
-    for (let k = 0; k < 40 && !applied; k++) {
-      obj.position.x += (Math.random() - 0.5) * step;
-      obj.position.y += (Math.random() - 0.5) * step;
-      obj.position.z += (Math.random() - 0.5) * step;
-      obj.rotation.y += (Math.random() - 0.5) * 0.12;
+  const solid = _meshWorldVolume(merged);
+  return { containerVolume: containerVol, solidVolume: Math.max(0, Math.min(solid, containerVol)) };
+}
+function _pointInsideAnyObject(p, rayDir = new THREE.Vector3(1,0,0)) {
+  const candidates = USE_ONLY_CONTAINER ? objects.filter(o => areaOf(o) === 'container') : objects;
+  // 球體快測
+  for (const o of candidates) {
+    if (o.userData?.isSphere) {
+      const { center, r } = getWorldSphereFromMesh(o);
+      if (center.distanceToSquared(p) <= r*r) return true;
+    }
+  }
+  _collideRaycaster.set(p, rayDir);
+  let hitCount = 0;
+  for (const o of candidates) {
+    const hits = _collideRaycaster.intersectObject(o, true);
+    if (hits.length) {
+      const n = hits.filter(h => h.distance > 1e-6).length;
+      hitCount += n;
+    }
+  }
+  return (hitCount % 2) === 1;
+}
+function _solidVolumeViaVoxel() {
+  const interior = _interiorMeshSolid(); if (!interior) return null;
+  const ibox = new THREE.Box3().setFromObject(interior);
+  const volContainer = (ibox.max.x-ibox.min.x)*(ibox.max.y-ibox.min.y)*(ibox.max.z-ibox.min.z);
 
-      // 尋找落地
-      obj.position.y = findRestingY(obj);
+  const nx=VOID_VOXEL_RES, ny=VOID_VOXEL_RES, nz=VOID_VOXEL_RES;
+  const dx=(ibox.max.x-ibox.min.x)/nx, dy=(ibox.max.y-ibox.min.y)/ny, dz=(ibox.max.z-ibox.min.z)/nz;
 
-      // 🚫 有重疊就撤回（⚠️ 修正：使用 isOverlapping，而非 anyOverlap）
-      if (isOverlapping(obj, obj)) {
-        obj.position.copy(backupPos);
-        obj.rotation.copy(backupRot);
-        continue;
+  let insideCount=0, total=nx*ny*nz;
+  const p=new THREE.Vector3(); const ray=new THREE.Vector3(1,0,0);
+
+  if (VOID_MC_SAMPLES>0){
+    total=VOID_MC_SAMPLES;
+    for (let s=0;s<VOID_MC_SAMPLES;s++){
+      p.set(
+        THREE.MathUtils.lerp(ibox.min.x, ibox.max.x, Math.random()),
+        THREE.MathUtils.lerp(ibox.min.y, ibox.max.y, Math.random()),
+        THREE.MathUtils.lerp(ibox.min.z, ibox.max.z, Math.random())
+      );
+      if (_pointInsideAnyObject(p, ray)) insideCount++;
+    }
+  } else {
+    for (let j=0;j<ny;j++){
+      const y=ibox.min.y+(j+0.5)*dy;
+      for (let k=0;k<nz;k++){
+        const z=ibox.min.z+(k+0.5)*dz;
+        for (let i=0;i<nx;i++){
+          const x=ibox.min.x+(i+0.5)*dx; p.set(x,y,z);
+          if (_pointInsideAnyObject(p, ray)) insideCount++;
+        }
       }
-      applied = true;
     }
-    if (!applied) { T *= cooling; continue; }
+  }
+  const solidRatio=insideCount/total; const solidVol=volContainer*solidRatio;
+  return { containerVolume:volContainer, solidVolume:solidVol };
+}
+function measureBlueVoid() {
+  if (!LIGHTWEIGHT_METRICS) {
+    try {
+      const r=_solidVolumeViaCSG();
+      if (r){ const empty=Math.max(0, r.containerVolume-r.solidVolume);
+        return { emptyVolume:empty, emptyRatio: r.containerVolume>0? empty/r.containerVolume:0, containerVolume:r.containerVolume, solidVolume:r.solidVolume };
+      }
+    } catch {}
+  }
+  const v=_solidVolumeViaVoxel();
+  if (v){
+    const empty=Math.max(0, v.containerVolume-v.solidVolume);
+    return { emptyVolume:empty, emptyRatio: v.containerVolume>0? empty/v.containerVolume:0, containerVolume:v.containerVolume, solidVolume:v.solidVolume };
+  }
+  return { emptyVolume:0, emptyRatio:0, containerVolume:0, solidVolume:0 };
+}
 
-    const e1 = packingEnergy();
-    const dE = e1 - e0;
-    const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
+/* =========================================================
+   幾何檢測：OBB/CSG/Sphere/Fallback
+========================================================= */
+function isPointInsideMesh(p, mesh) {
+  _collideRaycaster.set(p, new THREE.Vector3(1,0,0));
+  const hits = _collideRaycaster.intersectObject(mesh, true);
+  const n = hits.filter(h => h.distance > 1e-6).length;
+  return (n % 2) === 1;
+}
+function getWorldAABBCorners(mesh){
+  const b=new THREE.Box3().setFromObject(mesh);
+  return [
+    new THREE.Vector3(b.min.x,b.min.y,b.min.z),
+    new THREE.Vector3(b.max.x,b.min.y,b.min.z),
+    new THREE.Vector3(b.min.x,b.max.y,b.min.z),
+    new THREE.Vector3(b.max.x,b.max.y,b.min.z),
+    new THREE.Vector3(b.min.x,b.min.y,b.max.z),
+    new THREE.Vector3(b.max.x,b.min.y,b.max.z),
+    new THREE.Vector3(b.min.x,b.max.y,b.max.z),
+    new THREE.Vector3(b.max.x,b.max.y,b.max.z),
+  ];
+}
+function buildMeshOBB(mesh) {
+  const geo=mesh.geometry; if (!geo.boundingBox) geo.computeBoundingBox();
+  const bb=geo.boundingBox; const center=new THREE.Vector3(); const halfSize=new THREE.Vector3();
+  bb.getCenter(center); bb.getSize(halfSize).multiplyScalar(0.5);
+  const obb=new OBBClass(center.clone(), halfSize.clone());
+  mesh.updateMatrixWorld(true); obb.applyMatrix4(mesh.matrixWorld); obb.halfSize.subScalar(1e-4);
+  return obb;
+}
+function meshesReallyIntersect_OBB(a,b){
+  if (!HAS_OBB()) return null;
+  const ba=new THREE.Box3().setFromObject(a); const bb=new THREE.Box3().setFromObject(b);
+  if (!ba.intersectsBox(bb)) return false;
+  const aMeshes=[], bMeshes=[]; a.updateMatrixWorld(true); b.updateMatrixWorld(true);
+  a.traverse(n=>{ if(n.isMesh) aMeshes.push(n); }); b.traverse(n=>{ if(n.isMesh) bMeshes.push(n); });
+  for (const am of aMeshes){ const obbA=buildMeshOBB(am);
+    for (const bm of bMeshes){ const obbB=buildMeshOBB(bm); if (obbA.intersectsOBB(obbB)) return true; }
+  }
+  return false;
+}
+function meshesReallyIntersect_Fallback(a,b){
+  const ba=new THREE.Box3().setFromObject(a); const bb=new THREE.Box3().setFromObject(b);
+  if (!ba.intersectsBox(bb)) return false;
+  const ac=getWorldAABBCorners(a); for (const p of ac) if (isPointInsideMesh(p, b)) return true;
+  const bc=getWorldAABBCorners(b); for (const p of bc) if (isPointInsideMesh(p, a)) return true;
+  return false;
+}
+function meshesReallyIntersect_CSG(a,b){
+  const ba=new THREE.Box3().setFromObject(a); const bb=new THREE.Box3().setFromObject(b);
+  if (!ba.intersectsBox(bb)) return false;
+  let hit=false; const aMeshes=[], bMeshes=[];
+  a.updateMatrixWorld(true); b.updateMatrixWorld(true);
+  a.traverse(n=>{ if(n.isMesh) aMeshes.push(n); });
+  b.traverse(n=>{ if(n.isMesh) bMeshes.push(n); });
 
-    if (accept) {
-      if (e1 < bestEnergy) { bestEnergy = e1; bestSnap = snapshotState(); }
-      // 🎥 錄影：抽樣存幀並設上限
-      if ((++acceptedCount % TIMELINE_SAMPLE_EVERY) === 0) {
-        placementTimeline.push(snapshotState());
-        if (placementTimeline.length > TIMELINE_MAX_FRAMES) placementTimeline.shift();
+  const EPS_VOL=1e-3;
+  for (const am of aMeshes){
+    for (const bm of bMeshes){
+      const ab=new THREE.Box3().setFromObject(am);
+      const bb2=new THREE.Box3().setFromObject(bm);
+      if (!ab.intersectsBox(bb2)) continue;
+      try{
+        const inter=CSG.intersect(toCSGReady(am), toCSGReady(bm)); inter.updateMatrixWorld(true);
+        const vol=_meshWorldVolume(inter); if (vol>EPS_VOL){ hit=true; break; }
+      }catch(e){}
+    }
+    if (hit) break;
+  }
+  return hit;
+}
+function getWorldSphereFromMesh(sphereMesh) {
+  const center=new THREE.Vector3().setFromMatrixPosition(sphereMesh.matrixWorld);
+  const s=new THREE.Vector3(); sphereMesh.updateMatrixWorld(true);
+  sphereMesh.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+  const rWorld=(sphereMesh.userData?.sphereR||1)*Math.max(s.x,s.y,s.z);
+  return { center, r:rWorld };
+}
+function sphereIntersectsMeshTriangles(sphereMesh, otherMesh) {
+  const { center, r } = getWorldSphereFromMesh(sphereMesh);
+  const rEff=Math.max(0, r-1e-3); const r2=rEff*rEff;
+  let hit=false; const tri=new THREE.Triangle(); const closest=new THREE.Vector3();
+  const vA=new THREE.Vector3(), vB=new THREE.Vector3(), vC=new THREE.Vector3();
+  otherMesh.updateMatrixWorld(true);
+
+  const testOne=(m)=>{
+    const g=m.geometry; if (!g||!g.attributes?.position) return;
+    const pos=g.attributes.position; const idx=g.index?g.index.array:null;
+    if (idx){
+      for (let i=0;i<idx.length;i+=3){
+        vA.fromBufferAttribute(pos, idx[i+0]).applyMatrix4(m.matrixWorld);
+        vB.fromBufferAttribute(pos, idx[i+1]).applyMatrix4(m.matrixWorld);
+        vC.fromBufferAttribute(pos, idx[i+2]).applyMatrix4(m.matrixWorld);
+        tri.set(vA,vB,vC); tri.closestPointToPoint(center, closest);
+        if (closest.distanceToSquared(center)<=r2){ hit=true; return true; }
       }
     } else {
-      // 撤回
-      obj.position.copy(backupPos);
-      obj.rotation.copy(backupRot);
+      for (let i=0;i<pos.count;i+=3){
+        vA.fromBufferAttribute(pos, i+0).applyMatrix4(m.matrixWorld);
+        vB.fromBufferAttribute(pos, i+1).applyMatrix4(m.matrixWorld);
+        vC.fromBufferAttribute(pos, i+2).applyMatrix4(m.matrixWorld);
+        tri.set(vA,vB,vC); tri.closestPointToPoint(center, closest);
+        if (closest.distanceToSquared(center)<=r2){ hit=true; return true; }
+      }
     }
+  };
 
-    T *= cooling;
+  const bb=new THREE.Box3().setFromObject(otherMesh);
+  if (!bb.expandByScalar(r).containsPoint(center)) {
+    const sph=new THREE.Sphere(center, r);
+    if (!bb.intersectsSphere || !bb.intersectsSphere(sph)) return false;
   }
+  otherMesh.traverse(n=>{ if (!hit && n.isMesh) testOne(n); });
+  if (hit) return true;
+  if (isPointInsideMesh(center, otherMesh)) return true;
+  return false;
+}
+function sphereVsSphereIntersect(a,b){
+  const A=getWorldSphereFromMesh(a); const B=getWorldSphereFromMesh(b); const r=A.r+B.r;
+  return A.center.distanceToSquared(B.center) <= r*r;
+}
+function meshesReallyIntersect(a,b){
+  const ba=new THREE.Box3().setFromObject(a); const bb=new THREE.Box3().setFromObject(b);
+  if (!ba.intersectsBox(bb)) return false;
+  const aSphere=!!a.userData?.isSphere; const bSphere=!!b.userData?.isSphere;
+  if (aSphere && bSphere) return sphereVsSphereIntersect(a,b);
+  if (aSphere){ let hit=false; b.traverse(n=>{ if(!hit && n.isMesh) hit=sphereIntersectsMeshTriangles(a,n); }); if (hit) return true; }
+  else if (bSphere){ let hit=false; a.traverse(n=>{ if(!hit && n.isMesh) hit=sphereIntersectsMeshTriangles(b,n); }); if (hit) return true; }
+  const r=meshesReallyIntersect_OBB(a,b); if (r===true) return true;
+  if (meshesReallyIntersect_Fallback(a,b)) return true;
+  if (aSphere||bSphere) return false;
+  return meshesReallyIntersect_CSG(a,b);
+}
 
-  // 收尾 UI
-  showLoadingSpinner(false);
-  ConvergenceChart.stop();
-  updateOptimizePanel({ step: steps, total: steps, subtitle:'回放中…' });
+/* =========================================================
+   場景操作/放置/最佳化輔助
+========================================================= */
+const objects = [];
+let selectedObj = null;
+let selectionHelper = null;
+let FAST_PACKING = true;
 
-  // 🎬 完成後回放擺放過程（你已有的函式）
-  await playPlacementTimeline();
-
-  // 還原最佳狀態 + 壓實 + HUD
-  restoreState(bestSnap);
-  globalCompaction(2);
+function showSelection(obj) {
+  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+  if (obj) { selectionHelper = new THREE.BoxHelper(obj, 0xffaa00); scene.add(selectionHelper); }
+}
+function deleteSelected() {
+  if (!selectedObj) return;
+  const i = objects.indexOf(selectedObj);
+  if (i >= 0) objects.splice(i, 1);
+  scene.remove(selectedObj);
+  selectedObj = null;
+  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
   renderVoidHUD();
-
-  // 顯示最終效率
-  const containerBox = getInteriorBox?.(); // 你的工具函式會回傳 Box3
-  if (containerBox) {
-    const eff = computePackingEfficiencyCSG(containerBox); // %
-    uiToast(`最佳化完成，容積利用率 ${eff.toFixed(1)}%`);
-    updateOptimizePanel({ subtitle:`完成！容積利用率 ${eff.toFixed(1)}%` });
-  } else {
-    uiToast('最佳化完成');
-    updateOptimizePanel({ subtitle:'完成！' });
+}
+function clearAllObjects() {
+  objects.forEach(o => scene.remove(o));
+  objects.length = 0;
+  selectedObj = null;
+  if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+  renderVoidHUD();
+}
+function ensureSceneButtons() {
+  const ui = document.getElementById('ui'); if (!ui) return;
+  if (!document.getElementById('deleteSelectedBtn')) {
+    const b1 = document.createElement('button'); b1.id='deleteSelectedBtn'; b1.textContent='刪除選取'; b1.style.marginLeft='8px'; ui.appendChild(b1);
+    b1.addEventListener('click', deleteSelected);
   }
+  if (!document.getElementById('clearAllBtn')) {
+    const b2 = document.createElement('button'); b2.id='clearAllBtn'; b2.textContent='清空容器'; b2.style.marginLeft='8px'; ui.appendChild(b2);
+    b2.addEventListener('click', clearAllObjects);
+  }
+  if (!document.getElementById('voidBtn')) {
+    const b3=document.createElement('button'); b3.id='voidBtn'; b3.textContent='估算空隙'; b3.style.marginLeft='8px'; ui.appendChild(b3);
+    b3.addEventListener('click', showVoidStats);
+  }
+}
+addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected(); });
 
-  // 關閉小畫面
-  setTimeout(() => showOptimizePanel(false), 900);
-
-  // 還原設定
-  annealRunning = false;
-  LIGHTWEIGHT_METRICS = prevLight;
-
-  // 若你曾停掉 render loop，這裡可重新啟動（你原本就有）
-  // setTimeout(() => {
-  //   renderer.setAnimationLoop((time) => {
-  //     controls.update();
-  //     TWEEN.update(time);
-  //     renderer.render(scene, camera);
-  //   });
-  // }, 50);
+function buildTetrominoMesh(kind, unit, material) {
+  const group=new THREE.Group(); const g=new THREE.BoxGeometry(unit,unit,unit);
+  let layout=[];
+  switch(kind){
+    case 'tI': layout=[[-1.5,0],[-0.5,0],[0.5,0],[1.5,0]]; break;
+    case 'tT': layout=[[-1,0],[0,0],[1,0],[0,1]]; break;
+    case 'tZ': layout=[[-1,0],[0,0],[0,1],[1,1]]; break;
+    case 'tL': layout=[[-1,0],[0,0],[1,0],[-1,1]]; break;
+    default:   layout=[[-1,0],[0,0],[1,0],[0,1]];
+  }
+  for (const [gx,gz] of layout){
+    const cube=new THREE.Mesh(g, material);
+    cube.position.set(gx*unit, 0, gz*unit); group.add(cube);
+  }
+  const box=new THREE.Box3().setFromObject(group); const center=new THREE.Vector3(); box.getCenter(center);
+  group.children.forEach(c=>{ c.position.sub(center); });
+  group.userData.unit=unit; return group;
+}
+function updateParamVisibility(type = document.getElementById('shapeType')?.value) {
+  const box=document.getElementById('boxParams');
+  const sphere=document.getElementById('sphereParams');
+  const custom=document.getElementById('customParams');
+  const hole=document.getElementById('holeInput');
+  const chk=document.getElementById('hasHole'); if (!box || !sphere || !custom || !hole) return;
+  const isTet=TETROMINO_TYPES.has(type);
+  box.style.display=(type==='cube'||isTet)?'block':'none';
+  sphere.style.display=(type==='circle')?'block':'none';
+  custom.style.display=(type==='lshape')?'block':'none';
+  const w=document.getElementById('boxWidth');
+  const h=document.getElementById('boxHeight');
+  const d=document.getElementById('boxDepth');
+  if (isTet) {
+    if (w){ w.placeholder='單位邊長'; w.style.display='block'; }
+    if (h){ h.value=''; h.style.display='none'; }
+    if (d){ d.value=''; d.style.display='none'; }
+  } else if (type==='cube') {
+    if (w) w.style.display='block'; if (h) h.style.display='block'; if (d) d.style.display='block';
+  }
+  const canHole=!isTet; if (chk) chk.disabled=!canHole;
+  hole.style.display=(!isTet && chk?.checked)?'block':'none';
+}
+function clearFormFields() {
+  ['boxWidth','boxHeight','boxDepth','sphereWidth','customWidth','holeWidth','holeHeight'].forEach(id => {
+    const el=document.getElementById(id); if (el) el.value='';
+  });
+  updateParamVisibility();
 }
 
-// === 🔹 停止最佳化 ===
-function stopAnnealing() {
-  annealRunning = false;
-  uiToast('已停止最佳化');
-  showLoadingSpinner(false);
+// 區域：container / staging
+function getAreaByXZ(x,z){
+  const cbox=new THREE.Box3().setFromObject(container);
+  if (x>=cbox.min.x && x<=cbox.max.x && z>=cbox.min.z && z<=cbox.max.z) return 'container';
+  const halfW=stagingPad.geometry.parameters.width/2;
+  const halfD=stagingPad.geometry.parameters.depth/2;
+  const sxmin=stagingPad.position.x-halfW, sxmax=stagingPad.position.x+halfW;
+  const szmin=stagingPad.position.z-halfD, szmax=stagingPad.position.z+halfD;
+  if (x>=sxmin && x<=sxmax && z>=szmin && z<=szmax) return 'staging';
+  return null;
+}
+function areaOf(o){ return getAreaByXZ(o.position.x, o.position.z) || 'container'; }
+function getBoundsForArea(area, half) {
+  if (area === 'container') {
+    const cb = new THREE.Box3().setFromObject(container);
+    const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+    return {
+      minX: cb.min.x + half.x, maxX: cb.max.x - half.x,
+      minZ: cb.min.z + half.z, maxZ: cb.max.z - half.z,
+      minY: palletTop + half.y, maxY: cb.max.y - half.y,
+      baseY: palletTop
+    };
+  } else if (area === 'staging') {
+    const halfW = stagingPad.geometry.parameters.width / 2;
+    const halfD = stagingPad.geometry.parameters.depth / 2;
+    const baseY = stagingPad.position.y + stagingPad.geometry.parameters.height / 2;
+    return {
+      minX: stagingPad.position.x - halfW + half.x,
+      maxX: stagingPad.position.x + halfW - half.x,
+      minZ: stagingPad.position.z - halfD + half.z,
+      maxZ: stagingPad.position.z + halfD - half.z,
+      minY: baseY + half.y,
+      maxY: baseY + stageFrameGeo.parameters.height - half.y,
+      baseY
+    };
+  }
+  const baseY = pallet.position.y + pallet.geometry.parameters.height / 2;
+  return { minX:-Infinity,maxX:Infinity,minZ:-Infinity,maxZ:Infinity,minY:baseY+half.y,maxY:baseY+200-half.y,baseY };
 }
 
-/* document.getElementById('optimizeBtn')?.addEventListener('click', () => {
-    autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.5, ultraFactor: 0.33, steps: 9000 });
-});  */
-// 原本：autoPackMaxUtilization(...)
-document.getElementById('optimizeBtn')?.addEventListener('click', () => {
-  packToTheMax();   // ← 改成這個
-});
+// ⭐ 關鍵：強制物體扣回區域邊界 & Y 找落點（防超出）
+function clampIntoAreaBounds(obj){
+  const sb = new THREE.Box3().setFromObject(obj);
+  const size = new THREE.Vector3(); sb.getSize(size);
+  const half = size.clone().multiplyScalar(0.5);
+  const area = getAreaByXZ(obj.position.x, obj.position.z) || 'container';
+  const bd = getBoundsForArea(area, half);
 
+  obj.position.x = THREE.MathUtils.clamp(obj.position.x, bd.minX, bd.maxX);
+  obj.position.z = THREE.MathUtils.clamp(obj.position.z, bd.minZ, bd.maxZ);
+  obj.position.y = THREE.MathUtils.clamp(obj.position.y, bd.minY, bd.maxY);
+  obj.position.y = findRestingYForArea(obj, area, half);
+}
 
-document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => {
-    annealRunning = false;
-    ConvergenceChart.stop();
-});
+function _cloneForTest(o){ const c=o.clone(true); c.userData={...o.userData}; return c; }
+function isOverlapping(ncandidate, ignore = null) {
+  const candMeshes=[]; ncandidate.updateMatrixWorld(true);
+  ncandidate.traverse(n=>{ if (n.isMesh) candMeshes.push(n); });
 
-//（已在 ensureSceneButtons 綁定，避免重覆綁定）
-// document.getElementById('voidBtn')?.addEventListener('click', showVoidStats);
+  const sameArea = areaOf(ncandidate);
+  for (const obj of objects) {
+    if (obj === ignore) continue;
+    if (areaOf(obj) !== sameArea) continue;
 
-function applyColorToMaterial(color) {
-    return new THREE.MeshStandardMaterial({ color: new THREE.Color(normalizeColor(color)) });
+    const otherMeshes=[]; obj.updateMatrixWorld(true);
+    obj.traverse(n=>{ if (n.isMesh) otherMeshes.push(n); });
+
+    for (const cm of candMeshes) {
+      for (const om of otherMeshes) {
+        const a=new THREE.Box3().setFromObject(cm);
+        const b=new THREE.Box3().setFromObject(om);
+        if (!a.intersectsBox(b)) continue;
+        if (meshesReallyIntersect(cm, om)) return true;
+      }
+    }
+  }
+  return false;
+}
+function findRestingY(object) {
+  const clone=_cloneForTest(object);
+  const box=new THREE.Box3().setFromObject(object);
+  const size=new THREE.Vector3(); box.getSize(size);
+  let y=pallet.position.y+pallet.geometry.parameters.height/2+size.y/2;
+  const maxY=container.position.y+container.geometry.parameters.height/2-size.y/2;
+  while (y<=maxY){ clone.position.y=y; if (!isOverlapping(clone, object)) return y; y+=0.5; }
+  return object.position.y;
+}
+function findRestingYForArea(object, area, half) {
+  const { baseY, maxY } = getBoundsForArea(area, half);
+  const clone=_cloneForTest(object);
+  let y = baseY + half.y;
+  while (y <= maxY) {
+    clone.position.set(object.position.x, y, object.position.z);
+    if (!isOverlapping(clone, object)) return y;
+    y += 0.5;
+  }
+  return object.position.y;
+}
+function boundsForObjectXZ(obj){
+  const cb=new THREE.Box3().setFromObject(container);
+  const b=new THREE.Box3().setFromObject(obj); const sz=new THREE.Vector3(); b.getSize(sz);
+  const halfX=sz.x*0.5, halfZ=sz.z*0.5;
+  return { minX:cb.min.x+halfX, maxX:cb.max.x-halfX, minZ:cb.min.z+halfZ, maxZ:cb.max.z-halfZ };
+}
+function anchorScore(obj) {
+  const cb = new THREE.Box3().setFromObject(container);
+  const b  = new THREE.Box3().setFromObject(obj);
+  return (b.min.x - cb.min.x) + (b.min.z - cb.min.z) + 0.25 * Math.max(0, b.min.y - (pallet.position.y + pallet.geometry.parameters.height / 2));
+}
+function ensureInScene(o){ if (!o.parent) scene.add(o); if (!objects.includes(o)) objects.push(o); }
+function resetPose(mesh){ mesh.rotation.set(0,0,0); mesh.position.set(0,0,0); mesh.updateMatrixWorld(true); }
+function dedupeObjects(){ const seen=new Set(); for (let i=objects.length-1;i>=0;i--){ const o=objects[i]; if (seen.has(o)) objects.splice(i,1); else seen.add(o);} }
+
+/* =========================================================
+   能量評分（體素）
+========================================================= */
+function packingEnergy() {
+  if (objects.length === 0) return 0;
+  const cb=new THREE.Box3().setFromObject(container);
+  const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
+  const min=new THREE.Vector3(cb.min.x, palletTop, cb.min.z);
+  const max=new THREE.Vector3(cb.max.x, cb.max.y, cb.max.z);
+  const nx=PACK_VOXEL_RES, ny=PACK_VOXEL_RES, nz=PACK_VOXEL_RES;
+  const dx=(max.x-min.x)/nx, dy=(max.y-min.y)/ny, dz=(max.z-min.z)/nz;
+  const total=nx*ny*nz; if (total<=0) return 0;
+  const boxes=objects.map(o=>new THREE.Box3().setFromObject(o));
+  const grid=new Uint8Array(total); let emptyCount=0; const p=new THREE.Vector3();
+  const toIndex=(i,j,k)=> (j*nz + k)*nx + i;
+
+  for (let j=0;j<ny;j++){
+    const y=min.y+(j+0.5)*dy;
+    for (let k=0;k<nz;k++){
+      const z=min.z+(k+0.5)*dz;
+      for (let i=0;i<nx;i++){
+        const x=min.x+(i+0.5)*dx; p.set(x,y,z);
+        let occ=false; for (let b=0; b<boxes.length && !occ; b++){ if (boxes[b].containsPoint(p)) occ=true; }
+        const id=toIndex(i,j,k); grid[id]=occ?1:0; if (!occ) emptyCount++;
+      }
+    }
+  }
+  if (emptyCount===0) return 0;
+  const visited=new Uint8Array(total); const q=new Uint32Array(total); let largest=0;
+  for (let j=0;j<ny;j++) for (let k=0;k<nz;k++) for (let i=0;i<nx;i++){
+    const start=toIndex(i,j,k); if (grid[start]!==0 || visited[start]) continue;
+    let head=0, tail=0, size=0; visited[start]=1; q[tail++]=start;
+    while (head<tail){
+      const cur=q[head++]; size++; const ii=cur%nx; const jk=(cur-ii)/nx; const kk=jk%nz; const jj=(jk-kk)/nz;
+      if (ii>0){ const nid=cur-1; if (!visited[nid] && grid[nid]===0){ visited[nid]=1; q[tail++]=nid; } }
+      if (ii<nx-1){ const nid=cur+1; if (!visited[nid] && grid[nid]===0){ visited[nid]=1; q[tail++]=nid; } }
+      if (kk>0){ const nid=cur-nx; if (!visited[nid] && grid[nid]===0){ visited[nid]=1; q[tail++]=nid; } }
+      if (kk<nz-1){ const nid=cur+nx; if (!visited[nid] && grid[nid]===0){ visited[nid]=1; q[tail++]=nid; } }
+      if (jj>0){ const nid=cur-nx*nz; if (!visited[nid] && grid[nid]===0){ visited[nid]=1; q[tail++]=nid; } }
+      if (jj<ny-1){ const nid=cur+nx*nz; if (!visited[nid] && grid[nid]===0){ visited[nid]=1; q[tail++]=nid; } }
+    }
+    if (size>largest) largest=size;
+  }
+  const emptyRatio=emptyCount/total;
+  const largestVoidRatio=largest/emptyCount;
+  return ENERGY_W_EMPTY*emptyRatio + ENERGY_W_FRAGMENT*(1-largestVoidRatio);
+}
+function snapshotState(){ return objects.map(o=>({ obj:o, pos:o.position.clone(), rot:o.rotation.clone() })); }
+function restoreState(snap){ snap.forEach(s=>{ s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); }); }
+
+/* =========================================================
+   擺放/暫存/壓實/退火
+========================================================= */
+function tryBestAxisOrientation_Y(obj){
+  const beforePos=obj.position.clone(), beforeRot=obj.rotation.clone();
+  let best={ energy:Infinity, rot:beforeRot.clone(), pos:beforePos.clone() };
+  const eBase=packingEnergy();
+  for (const ay of RIGHT_ANGLES){
+    obj.rotation.set(0, ay, 0);
+    const b=boundsForObjectXZ(obj);
+    obj.position.x = THREE.MathUtils.clamp(obj.position.x, b.minX, b.maxX);
+    obj.position.z = THREE.MathUtils.clamp(obj.position.z, b.minZ, b.maxZ);
+    obj.position.y = findRestingY(obj);
+    if (isOverlapping(obj, obj)) continue;
+    const e = packingEnergy();
+    if (e < best.energy) best={ energy:e, rot:obj.rotation.clone(), pos:obj.position.clone() };
+  }
+  if (best.energy + 1e-9 < eBase) { obj.rotation.copy(best.rot); obj.position.copy(best.pos); clampIntoAreaBounds(obj); return true; }
+  obj.rotation.copy(beforeRot); obj.position.copy(beforePos); return false;
+}
+function globalCompaction(passes = 3) {
+  const stepFor = (o) => Math.max(0.5, o.userData?.unit || 2);
+  for (let t = 0; t < passes; t++) {
+    const order = objects.slice().sort(() => Math.random() - 0.5);
+    for (const o of order) {
+      o.position.y = findRestingY(o);
+      clampIntoAreaBounds(o);
+      let improved = true;
+      while (improved) {
+        improved = false;
+        const e0 = packingEnergy();
+        const s  = stepFor(o);
+        const b  = boundsForObjectXZ(o);
+        const tryMove = (dx, dz) => {
+          const oldPos = o.position.clone();
+          const oldScore = anchorScore(o);
+          o.position.x = THREE.MathUtils.clamp(o.position.x + dx * s, b.minX, b.maxX);
+          o.position.z = THREE.MathUtils.clamp(o.position.z + dz * s, b.minZ, b.maxZ);
+          o.position.y = findRestingY(o);
+          clampIntoAreaBounds(o);
+
+          if (!isOverlapping(o, o)) {
+            const e1 = packingEnergy();
+            if (e1 < e0 - 1e-6) { improved = true; return true; }
+            if (Math.abs(e1 - e0) < 1e-6) {
+              const newScore = anchorScore(o);
+              if (newScore < oldScore - 1e-6) { improved = true; return true; }
+            }
+          }
+          o.position.copy(oldPos);
+          clampIntoAreaBounds(o);
+          return false;
+        };
+        tryMove( 1, 0) || tryMove(-1, 0) || tryMove(0,  1) || tryMove(0, -1);
+      }
+    }
+  }
+}
+function shakeAndSettle(iter=2) {
+  const step = 0.6;
+  for (let t=0; t<iter; t++) {
+    const order = objects.slice().sort((a,b)=> anchorScore(a)-anchorScore(b));
+    for (const o of order) {
+      const b = boundsForObjectXZ(o);
+      let moved = true;
+      while (moved) {
+        moved = false;
+        const old = o.position.clone();
+        o.position.x = THREE.MathUtils.clamp(o.position.x - step, b.minX, b.maxX);
+        o.position.z = THREE.MathUtils.clamp(o.position.z - step, b.minZ, b.maxZ);
+        o.position.y = findRestingY(o);
+        clampIntoAreaBounds(o);
+        if (isOverlapping(o,o)) o.position.copy(old);
+        else if (o.position.distanceTo(old) > 1e-6) moved = true;
+
+        const keep = o.position.clone();
+        const rx = (Math.random()-0.5)*step, rz = (Math.random()-0.5)*step;
+        o.position.x = THREE.MathUtils.clamp(o.position.x + rx, b.minX, b.maxX);
+        o.position.z = THREE.MathUtils.clamp(o.position.z + rz, b.minZ, b.maxZ);
+        o.position.y = findRestingY(o);
+        clampIntoAreaBounds(o);
+        if (isOverlapping(o,o)) o.position.copy(keep);
+      }
+    }
+  }
 }
 
 function isInsideContainerAABB(obj, eps = 1e-3) {
@@ -1969,7 +1090,6 @@ function isInsideContainerAABB(obj, eps = 1e-3) {
     b.max.y <= cb.max.y + eps
   );
 }
-
 function packingEnergyWithCandidate(candidate) {
   candidate.updateMatrixWorld(true);
   objects.push(candidate);
@@ -1977,7 +1097,6 @@ function packingEnergyWithCandidate(candidate) {
   objects.pop();
   return e;
 }
-
 function placeInsideContainer(mesh, opts = {}) {
   const containerBox = new THREE.Box3().setFromObject(container);
   const box = new THREE.Box3().setFromObject(mesh);
@@ -1988,8 +1107,7 @@ function placeInsideContainer(mesh, opts = {}) {
 
   const grid = mesh.userData?.unit || null;
   const stepBase = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
-  const step = Math.max(0.15, stepBase * (opts.stepScale ?? 1.0)); // ← 支援細掃描
-
+  const step = Math.max(0.15, stepBase * (opts.stepScale ?? 1.0));
   const snap = (v, g) => g ? Math.round(v / g) * g : v;
 
   const leftX  = containerBox.min.x + size.x/2 + padding;
@@ -1998,7 +1116,6 @@ function placeInsideContainer(mesh, opts = {}) {
   const frontZ = containerBox.max.z - size.z/2 - padding;
 
   let best = null;
-
   for (let x = leftX; x <= rightX + 1e-6; x += step) {
     for (let z = backZ; z <= frontZ + 1e-6; z += step) {
       for (const ay of angles) {
@@ -2007,9 +1124,7 @@ function placeInsideContainer(mesh, opts = {}) {
         mesh.position.y = findRestingY(mesh);
 
         if (!isInsideContainerAABB(mesh)) continue;
-        /* if (isOverlapping(mesh)) continue; */
-        if (isOverlapping(mesh, mesh)) continue;   // ✅ 忽略自己
-
+        if (isOverlapping(mesh, mesh)) continue;
 
         const e = FAST_PACKING ? 0 : packingEnergyWithCandidate(mesh);
         const b = new THREE.Box3().setFromObject(mesh);
@@ -2025,242 +1140,401 @@ function placeInsideContainer(mesh, opts = {}) {
       }
     }
   }
-
   if (!best) return false;
 
   mesh.position.copy(best.pos);
   mesh.rotation.copy(best.rot);
+  clampIntoAreaBounds(mesh);
   if (isOverlapping(mesh)) return false;
 
-  // 避免重複加入
   ensureInScene(mesh);
-
   tryBestAxisOrientation_Y(mesh);
   mesh.position.y = findRestingY(mesh);
+  clampIntoAreaBounds(mesh);
   globalCompaction(3);
   shakeAndSettle();
-  nudgeViewDuringOptimization(mesh, 220);
   renderVoidHUD();
   return true;
 }
-
-// 將物體放到暫存區（紅框）內，避免重疊，優先左後角，支援 0/90/180/270° 朝向
 function placeInStaging(mesh) {
-  // 取尺寸 & 暫存區邊界
-  const box = new THREE.Box3().setFromObject(mesh);
-  const size = new THREE.Vector3(); box.getSize(size);
-  const half = size.clone().multiplyScalar(0.5);
+  const box=new THREE.Box3().setFromObject(mesh);
+  const size=new THREE.Vector3(); box.getSize(size);
+  const half=size.clone().multiplyScalar(0.5);
 
-  const bounds = getBoundsForArea('staging', half); // {minX,maxX,minZ,maxZ,minY,maxY,baseY}
+  const bounds=getBoundsForArea('staging', half);
+  const grid=mesh.userData?.unit || null;
+  const step=grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
+  const snap=(v,g)=> g?Math.round(v/g)*g:v;
 
-  const grid = mesh.userData?.unit || null;
-  const step = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
-  const snap = (v, g) => g ? Math.round(v / g) * g : v;
-
-  let placed = false;
-
-  // 由左→右、後→前掃描；每格試 4 個直角朝向
+  let placed=false;
   outer:
-  for (let z = bounds.minZ; z <= bounds.maxZ + 1e-6; z += step) {
-    for (let x = bounds.minX; x <= bounds.maxX + 1e-6; x += step) {
-      for (const ay of RIGHT_ANGLES) {
+  for (let z=bounds.minZ; z<=bounds.maxZ+1e-6; z+=step){
+    for (let x=bounds.minX; x<=bounds.maxX+1e-6; x+=step){
+      for (const ay of RIGHT_ANGLES){
         mesh.rotation.set(0, ay, 0);
         mesh.position.set(snap(x, grid), 0, snap(z, grid));
         mesh.position.y = findRestingYForArea(mesh, 'staging', half);
 
-        // AABB 是否完全在 staging 邊界內
-        const sb = new THREE.Box3().setFromObject(mesh);
-        const inside =
-          sb.min.x >= bounds.minX - 1e-3 && sb.max.x <= bounds.maxX + 1e-3 &&
-          sb.min.z >= bounds.minZ - 1e-3 && sb.max.z <= bounds.maxZ + 1e-3 &&
-          sb.min.y >= bounds.minY - 1e-3 && sb.max.y <= bounds.maxY + 1e-3;
+        const sb=new THREE.Box3().setFromObject(mesh);
+        const inside= sb.min.x>=bounds.minX-1e-3 && sb.max.x<=bounds.maxX+1e-3 &&
+                      sb.min.z>=bounds.minZ-1e-3 && sb.max.z<=bounds.maxZ+1e-3 &&
+                      sb.min.y>=bounds.minY-1e-3 && sb.max.y<=bounds.maxY+1e-3;
         if (!inside) continue;
+        if (isOverlapping(mesh, mesh)) continue;
 
-        // 不與現有 objects 碰撞
-        /* if (isOverlapping(mesh)) continue; */
-        if (isOverlapping(mesh, mesh)) continue;   // ✅ 忽略自己
-
-
-        placed = true;
-        break outer;
+        placed=true; break outer;
       }
     }
   }
-
- // 找不到網格位：退而求其次，放在暫存區中心上方，再墜落
-if (!placed) {
-  mesh.position.set(stagingPad.position.x, bounds.minY, stagingPad.position.z);
-  mesh.position.y = findRestingYForArea(mesh, 'staging', half);
-
-  if (isOverlapping(mesh)) {
-    console.warn('⚠️ 暫存區已滿或放置失敗（避免重疊）');
-    return false;
+  if (!placed) {
+    mesh.position.set(stagingPad.position.x, bounds.minY, stagingPad.position.z);
+    mesh.position.y = findRestingYForArea(mesh, 'staging', half);
+    clampIntoAreaBounds(mesh);
+    if (isOverlapping(mesh)) { console.warn('暫存區已滿或放置失敗'); return false; }
   }
-}
-
-
-  /* scene.add(mesh);
-  objects.push(mesh); */
-  if (!mesh.parent) scene.add(mesh);
-  if (!objects.includes(mesh)) objects.push(mesh);   // ✅ 不重複加入
-
-
-  // 小優化：視角帶到新物體；更新 HUD（藍色容器空隙）
-  nudgeViewDuringOptimization(mesh, 220);
+  ensureInScene(mesh);
+  clampIntoAreaBounds(mesh);
   renderVoidHUD();
   return true;
 }
-
-function shakeAndSettle(iter=2) {
-  const step = 0.6;
-  for (let t=0; t<iter; t++) {
-    const order = objects.slice().sort((a,b)=> anchorScore(a)-anchorScore(b)); // 靠角優先
-    for (const o of order) {
-      const b = boundsForObjectXZ(o);
-      let moved = true;
-      nudgeViewDuringOptimization(o, 120);
-      while (moved) {
-        moved = false;
-        const old = o.position.clone();
-
-        o.position.x = THREE.MathUtils.clamp(o.position.x - step, b.minX, b.maxX);
-        o.position.z = THREE.MathUtils.clamp(o.position.z - step, b.minZ, b.maxZ);
-        o.position.y = findRestingY(o);
-        if (isOverlapping(o,o)) o.position.copy(old);
-        else if (o.position.distanceTo(old) > 1e-6) moved = true;
-
-        const keep = o.position.clone();
-        const rx = (Math.random()-0.5)*step, rz = (Math.random()-0.5)*step;
-        o.position.x = THREE.MathUtils.clamp(o.position.x + rx, b.minX, b.maxX);
-        o.position.z = THREE.MathUtils.clamp(o.position.z + rz, b.minZ, b.maxZ);
-        o.position.y = findRestingY(o);
-        if (isOverlapping(o,o)) o.position.copy(keep);
-      }
-    }
-  }
-}
-
-function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType = 'auto', holeAxis = 'y') {
-    const material = applyColorToMaterial(color);
-    let mesh;
-
-    if (TETROMINO_TYPES.has(type)) {
-        const unit = Number.isFinite(+width) ? +width : 20;
-        mesh = buildTetrominoMesh(type, unit, material);
-
-    } else if (type === 'cube') {
-        const outer0 = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
-        const outer  = toCSGReady(outer0);
-        if (hasHole) {
-            const full = axisThickness(width, height, depth, holeAxis);
-            const hole = makeHoleMesh({
-                holeType : (holeType && holeType !== 'auto') ? holeType : 'box',
-                holeAxis,
-                holeWidth,
-                holeHeight,
-                holeDepth: full + 2 * EPS
-            });
-            hole.position.copy(outer.position);
-            try {
-                const result = CSG.subtract(outer, hole);
-                result.geometry.computeVertexNormals();
-                result.material = material;
-                mesh = result;
-            } catch (err) {
-                console.error('CSG subtraction failed:', err);
-                mesh = outer;
-            }
-        } else {
-            mesh = outer;
-        }
-
-    } else if (type === 'circle') {
-        const R = Math.max(1, width * 0.5);
-        let outer = new THREE.Mesh(new THREE.SphereGeometry(R, 48, 48), material);
-        outer = toCSGReady(outer);
-        if (hasHole) {
-            const r = Math.max(0.5, (holeWidth || R * 0.5) * 0.5);
-            const h = width + 4;
-            let hole = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 48), material);
-            hole.position.copy(outer.position);
-            hole = toCSGReady(hole);
-            try {
-                const result = CSG.subtract(outer, hole);
-                result.geometry.computeVertexNormals();
-                result.material = material;
-                mesh = result;
-            } catch (err) {
-                console.error('CSG subtraction failed:', err);
-                mesh = outer;
-            }
-        } else {
-            mesh = outer;
-        }
-        mesh.userData.isSphere = true;
-        mesh.userData.sphereR  = Math.max(1, width * 0.5);
-        mesh.userData.type     = 'custom';
-
-    } else if (type === 'lshape') {
-        const edge = Math.max(1, width);
-        const unitGeo = new THREE.BoxGeometry(edge, edge, edge);
-        const coords = [[0,0,0],[1,0,0],[0,1,0],[0,0,1]];
-        const make = (ix,iy,iz) => {
-            const m = new THREE.Mesh(unitGeo.clone(), material);
-            m.position.set(ix*edge, iy*edge, iz*edge);
-            return toCSGReady(m);
-        };
-        let combined = make(...coords[0]);
-        for (let i=1;i<coords.length;i++) combined = CSG.union(combined, make(...coords[i]));
-        combined.geometry.computeVertexNormals();
-        combined.material = material;
-        combined.geometry.computeBoundingBox();
-        const c = combined.geometry.boundingBox.getCenter(new THREE.Vector3());
-        combined.geometry.translate(-c.x, -c.y, -c.z);
-        if (hasHole) {
-            const size = new THREE.Vector3();
-            combined.geometry.boundingBox.getSize(size);
-            const hw = Math.min(holeWidth || edge * 0.8, edge * 2.2);
-            const hh = Math.min(holeHeight || edge * 0.8, edge * 1.8);
-            const hd = size.z + 2;
-            const hole = new THREE.Mesh(new THREE.BoxGeometry(hw, hh, hd), new THREE.MeshBasicMaterial());
-            hole.position.set(-edge * 0.25, -edge * 0.25, 0);
-            try {
-                const sub = CSG.subtract(toCSGReady(combined), toCSGReady(hole));
-                sub.geometry.computeVertexNormals();
-                sub.material = material;
-                combined = sub;
-            } catch (err) {
-                console.warn('CSG 挖孔失敗，退回未挖孔圖形：', err);
-            }
-        }
-        mesh = combined;
-
-    } else {
-        mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
-    }
-
-    // ---- 新放置流程：直接丟到「暫存區（紅色容器）」 ----
-    mesh.rotation.set(0, 0, 0);
-    mesh.position.set(0, 0, 0);
-    mesh.updateMatrixWorld(true);
-
-    // 只嘗試放進暫存區；若失敗就簡單放到暫存區中心並落下
+function rescueToStaging(mesh){
+  try{
     if (!placeInStaging(mesh)) {
-        const b = getBoundsForArea('staging', new THREE.Vector3(1,1,1));
-        mesh.position.set(stagingPad.position.x, b.minY, stagingPad.position.z);
-        ensureInScene(mesh);
-        mesh.position.y = findRestingYForArea(mesh, 'staging', new THREE.Vector3(0.5,0.5,0.5));
+      const b=getBoundsForArea('staging', new THREE.Vector3(1,1,1));
+      mesh.position.set(stagingPad.position.x, b.minY, stagingPad.position.z);
+      ensureInScene(mesh);
     }
-
-    mesh.userData.type = 'custom';
-    mesh.userData.originalY = mesh.position.y;
-
-    // 小優化：把鏡頭帶到新物件並更新 HUD
-    nudgeViewDuringOptimization(mesh, 220);
-    renderVoidHUD();
+  } catch(e){ console.warn('rescueToStaging 失敗', e); ensureInScene(mesh); }
 }
 
+/* === 退火（含錄影、面板、折線圖） === */
+function makeTimeSlicer(budgetMs = 12) {
+  let last = performance.now();
+  return async function slice(){ const now=performance.now(); if (now-last>=budgetMs){ await new Promise(r=>setTimeout(r,0)); last=performance.now(); } };
+}
+async function playPlacementTimeline() {
+  if (placementTimeline.length === 0 || playingTimeline) return;
+  playingTimeline = true;
+  uiToast('正在播放擺放過程...');
+  for (const frame of placementTimeline) {
+    for (const f of frame) {
+      const obj = objects.find(o => o === f.obj || o.uuid === f.obj?.uuid || o.uuid === f.id);
+      if (obj) { obj.position.copy(f.pos); obj.rotation.copy(f.rot); }
+    }
+    renderer.render(scene, camera);
+    await new Promise(r => setTimeout(r, 25));
+  }
+  uiToast('播放完成');
+  playingTimeline = false;
+  for (const frame of placementTimeline) for (const f of frame){ f.pos=null; f.rot=null; }
+  placementTimeline.length = 0;
+}
+async function runAnnealing(opts = {}) {
+  if (objects.length === 0) { uiToast('目前沒有物體可最佳化'); return; }
+  if (annealRunning) { uiToast('最佳化已在進行中'); return; }
 
+  annealRunning = true;
+  placementTimeline = [];
+  let acceptedCount = 0;
+
+  showLoadingSpinner(true);
+  showOptimizePanel(true);
+  updateOptimizePanel({ subtitle:'計算初始能量…' });
+  ConvergenceChart.start();
+
+  const steps    = opts.steps    ?? 10000;
+  const initTemp = opts.initTemp ?? 120;
+  const cooling  = opts.cooling  ?? 0.997;
+  const baseStep = opts.baseStep ?? 4;
+
+  const slice = makeTimeSlicer(12);
+  const prevLight = LIGHTWEIGHT_METRICS;
+  LIGHTWEIGHT_METRICS = true;
+
+  uiToast('開始最佳化擺放');
+  let bestSnap   = snapshotState();
+  let bestEnergy = packingEnergy();
+  let T = initTemp;
+
+  for (let s = 0; s < steps && annealRunning; s++) {
+    await slice();
+    if ((s & 63) === 0) {
+      const r = measureBlueVoid();
+      updateOptimizePanel({ step:s, total:steps, subtitle:`退火中（T=${T.toFixed(1)}）`, emptyPct:r.emptyRatio*100 });
+    }
+
+    const obj  = objects[Math.floor(Math.random() * objects.length)];
+    const step = obj.userData?.unit || baseStep;
+    const e0   = packingEnergy();
+
+    let applied = false;
+    const backupPos = obj.position.clone();
+    const backupRot = obj.rotation.clone();
+
+    for (let k = 0; k < 40 && !applied; k++) {
+      obj.position.x += (Math.random() - 0.5) * step;
+      obj.position.y += (Math.random() - 0.5) * step;
+      obj.position.z += (Math.random() - 0.5) * step;
+      obj.rotation.y += (Math.random() - 0.5) * 0.12;
+
+      obj.position.y = findRestingY(obj);
+      clampIntoAreaBounds(obj);
+
+      if (isOverlapping(obj, obj)) {
+        obj.position.copy(backupPos);
+        obj.rotation.copy(backupRot);
+        clampIntoAreaBounds(obj);
+        continue;
+      }
+      applied = true;
+    }
+    if (!applied) { T *= cooling; continue; }
+
+    const e1 = packingEnergy();
+    const dE = e1 - e0;
+    const accept = (dE <= 0) || (Math.random() < Math.exp(-dE / T));
+
+    if (accept) {
+      if (e1 < bestEnergy) { bestEnergy = e1; bestSnap = snapshotState(); }
+      if ((++acceptedCount % TIMELINE_SAMPLE_EVERY) === 0) {
+        const snap = snapshotState();
+        placementTimeline.push(snap);
+        if (placementTimeline.length > TIMELINE_MAX_FRAMES) placementTimeline.shift();
+      }
+    } else {
+      obj.position.copy(backupPos);
+      obj.rotation.copy(backupRot);
+      clampIntoAreaBounds(obj);
+    }
+    T *= cooling;
+  }
+
+  showLoadingSpinner(false);
+  ConvergenceChart.stop();
+  updateOptimizePanel({ step: steps, total: steps, subtitle:'回放中…' });
+
+  await playPlacementTimeline();
+
+  restoreState(bestSnap);
+  objects.forEach(clampIntoAreaBounds);
+  globalCompaction(2);
+  renderVoidHUD();
+
+  const r = measureBlueVoid();
+  uiToast(`最佳化完成，容積利用率 ${(100 - r.emptyRatio*100).toFixed(1)}%`);
+  updateOptimizePanel({ subtitle:`完成！容積利用率 ${(100 - r.emptyRatio*100).toFixed(1)}%` });
+
+  setTimeout(() => showOptimizePanel(false), 900);
+  annealRunning = false;
+  LIGHTWEIGHT_METRICS = prevLight;
+}
+function stopAnnealing() {
+  annealRunning = false;
+  uiToast('已停止最佳化');
+  showLoadingSpinner(false);
+}
+
+/* =========================================================
+   自動擺放流程（先大後小 + 暫存）
+========================================================= */
+async function uiYield(){ return new Promise(r => requestAnimationFrame(()=>r())); }
+
+async function stageFirstLargest(options = {}) {
+  const staged = objects.filter(o => areaOf(o) === 'staging');
+  if (!staged.length) return;
+  const ranked = staged.map(o=>({o, vol:worldVolumeOfObject(o)})).sort((a,b)=>b.vol-a.vol).map(x=>x.o);
+  uiToast(`暫存區 ${ranked.length} 件：由大到小嘗試入箱`);
+  for (const m of ranked) {
+    resetPose(m);
+    let ok =
+      placeInsideContainer(m, { stepScale: 1.0,  padding: 0.04, angles: RIGHT_ANGLES }) ||
+      placeInsideContainer(m, { stepScale: 0.55, padding: 0.02, angles: RIGHT_ANGLES }) ||
+      placeInsideContainer(m, { stepScale: 0.33, padding: 0.02, angles: RIGHT_ANGLES });
+    if (!ok) placeInStaging(m);
+    clampIntoAreaBounds(m);
+    await uiYield();
+  }
+  renderVoidHUD();
+}
+async function autoPackMaxUtilization(options = {}) {
+  if (annealRunning) { uiToast('請先停止正在進行的最佳化'); return; }
+  for (const o of objects){ o.visible=true; ensureInScene(o); }
+  const bigRatio = options.bigRatio ?? 0.6;
+  const fineFactor = options.fineFactor ?? 0.5;
+  const ultraFactor = options.ultraFactor ?? 0.33;
+
+  const ranked = objects.slice().map(o=>({o,vol:worldVolumeOfObject(o)})).sort((a,b)=>b.vol-a.vol).map(x=>x.o);
+  const cut = Math.max(1, Math.round(ranked.length * bigRatio));
+  const big = ranked.slice(0, cut);
+  const small = ranked.slice(cut);
+
+  FAST_PACKING = true;
+  for (const m of big) {
+    resetPose(m);
+    const ok = placeInsideContainer(m, { stepScale: 1.0, padding: 0.05, angles: RIGHT_ANGLES });
+    if (!ok) rescueToStaging(m);
+    clampIntoAreaBounds(m);
+    await uiYield();
+  }
+
+  FAST_PACKING = false;
+  for (const m of small) {
+    resetPose(m);
+    let ok = placeInsideContainer(m, { stepScale: fineFactor,  padding: 0.02, angles: RIGHT_ANGLES });
+    if (!ok) ok = placeInsideContainer(m, { stepScale: ultraFactor, padding: 0.02, angles: RIGHT_ANGLES });
+    if (!ok) rescueToStaging(m);
+    clampIntoAreaBounds(m);
+    await uiYield();
+  }
+
+  globalCompaction(2);
+  await runAnnealing({ steps: options.steps ?? 9000, initTemp: 90, cooling: 0.997, baseStep: 3, baseAngle: Math.PI/18 });
+
+  const r = measureBlueVoid();
+  uiToast(`完成：利用率 ${(100 - r.emptyRatio * 100).toFixed(1)}%`);
+  renderVoidHUD();
+}
+async function packToTheMax() {
+  if (annealRunning) { uiToast('請先停止正在進行的最佳化'); return; }
+  if (!objects.length) { uiToast('目前沒有物體'); return; }
+
+  LIGHTWEIGHT_METRICS = true;
+  await stageFirstLargest();
+
+  const _oldPACK = PACK_VOXEL_RES;
+  PACK_VOXEL_RES = 18;
+
+  await autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.45, ultraFactor: 0.28, steps: 11000 });
+
+  const staged = objects.filter(o => (getAreaByXZ(o.position.x, o.position.z) === 'staging'));
+  if (staged.length) uiToast(`再嘗試塞入剩餘 ${staged.length} 件`);
+  for (const m of staged) {
+    resetPose(m);
+    let ok = placeInsideContainer(m, { stepScale: 0.55, padding: 0.02 })
+          || placeInsideContainer(m, { stepScale: 0.33, padding: 0.02 })
+          || placeInsideContainer(m, { stepScale: 0.22, padding: 0.015 });
+    if (!ok) placeInStaging(m);
+    clampIntoAreaBounds(m);
+    await uiYield();
+  }
+
+  globalCompaction(3);
+  shakeAndSettle(3);
+  for (const o of objects) { tryBestAxisOrientation_Y(o); o.position.y = findRestingY(o); clampIntoAreaBounds(o); }
+
+  await runAnnealing({ steps: 6000, initTemp: 80, cooling: 0.998, baseStep: 2, baseAngle: Math.PI/18 });
+  globalCompaction(2);
+
+  const r = measureBlueVoid();
+  uiToast(`完成：容積利用率 ${(100 - r.emptyRatio*100).toFixed(1)}%`);
+  renderVoidHUD();
+
+  PACK_VOXEL_RES = _oldPACK;
+  LIGHTWEIGHT_METRICS = false;
+}
+
+/* =========================================================
+   產生幾何（cube/circle/tetromino/L-shape）
+========================================================= */
+function defaultHoleTypeByShape(type, hasHole) { if (!hasHole) return 'none'; if (type==='circle') return 'cyl'; return 'box'; }
+function axisThickness(w,h,d,axis='y'){ axis=axis.toLowerCase(); return axis==='x'?w:axis==='y'?h:d; }
+function makeHoleMesh(opts={}) {
+  const holeType=(opts.holeType||'box').toLowerCase();
+  const axis=(opts.holeAxis||'y').toLowerCase();
+  const width=Math.max(1,(opts.holeWidth||10));
+  const height=Math.max(1,(opts.holeHeight||10));
+  const depth=Math.max(1,(opts.holeDepth||10));
+  if (holeType==='sphere'){
+    const r=Math.max(1, width*0.5)-EPS;
+    const g=new THREE.SphereGeometry(r,24,16);
+    return toCSGReady(new THREE.Mesh(g,new THREE.MeshBasicMaterial()));
+  }
+  if (holeType==='cyl'){
+    const r=Math.max(1,width*0.5);
+    const h=depth+2*EPS;
+    const g=new THREE.CylinderGeometry(r,r,h,24);
+    const m=new THREE.Mesh(g,new THREE.MeshBasicMaterial());
+    if (axis==='x') m.rotation.z=Math.PI/2;
+    if (axis==='z') m.rotation.x=Math.PI/2;
+    return toCSGReady(m);
+  }
+  let bx=width+2*EPS, by=height+2*EPS, bz=depth+2*EPS;
+  if (axis==='x') { bx=depth+2*EPS; } else if (axis==='y'){ by=depth+2*EPS; } else { bz=depth+2*EPS; }
+  const g=new THREE.BoxGeometry(bx,by,bz);
+  return toCSGReady(new THREE.Mesh(g,new THREE.MeshBasicMaterial()));
+}
+function applyColorToMaterial(color){ return new THREE.MeshStandardMaterial({ color:new THREE.Color(normalizeColor(color)) }); }
+
+function createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType='auto', holeAxis='y') {
+  const material = applyColorToMaterial(color);
+  let mesh;
+  if (TETROMINO_TYPES.has(type)) {
+    const unit=Number.isFinite(+width)?+width:20;
+    mesh = buildTetrominoMesh(type, unit, material);
+  } else if (type==='cube') {
+    const outer0=new THREE.Mesh(new THREE.BoxGeometry(width,height,depth), material);
+    const outer=toCSGReady(outer0);
+    if (hasHole){
+      const full=axisThickness(width,height,depth,holeAxis);
+      const hole=makeHoleMesh({ holeType:(holeType&&holeType!=='auto')?holeType:'box', holeAxis, holeWidth, holeHeight, holeDepth:full+2*EPS });
+      hole.position.copy(outer.position);
+      try{ const result=CSG.subtract(outer, hole); result.geometry.computeVertexNormals(); result.material=material; mesh=result; }
+      catch(err){ console.error('CSG subtraction failed:', err); mesh=outer; }
+    } else mesh=outer;
+  } else if (type==='circle') {
+    const R=Math.max(1, width*0.5);
+    let outer=new THREE.Mesh(new THREE.SphereGeometry(R,48,48), material);
+    outer=toCSGReady(outer);
+    if (hasHole){
+      const r=Math.max(0.5,(holeWidth||R*0.5)*0.5); const h=width+4;
+      let hole=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,48), material);
+      hole.position.copy(outer.position); hole=toCSGReady(hole);
+      try{ const result=CSG.subtract(outer, hole); result.geometry.computeVertexNormals(); result.material=material; mesh=result; }
+      catch(err){ console.error('CSG subtraction failed:', err); mesh=outer; }
+    } else mesh=outer;
+    mesh.userData.isSphere=true; mesh.userData.sphereR=Math.max(1, width*0.5); mesh.userData.type='custom';
+  } else if (type==='lshape') {
+    const edge=Math.max(1, width);
+    const unitGeo=new THREE.BoxGeometry(edge,edge,edge);
+    const coords=[[0,0,0],[1,0,0],[0,1,0],[0,0,1]];
+    const make=(ix,iy,iz)=>{ const m=new THREE.Mesh(unitGeo.clone(), material); m.position.set(ix*edge,iy*edge,iz*edge); return toCSGReady(m); };
+    let combined=make(...coords[0]); for (let i=1;i<coords.length;i++) combined=CSG.union(combined, make(...coords[i]));
+    combined.geometry.computeVertexNormals(); combined.material=material; combined.geometry.computeBoundingBox();
+    const c=combined.geometry.boundingBox.getCenter(new THREE.Vector3()); combined.geometry.translate(-c.x,-c.y,-c.z);
+    if (hasHole){
+      const size=new THREE.Vector3(); combined.geometry.boundingBox.getSize(size);
+      const hw=Math.min(holeWidth||edge*0.8, edge*2.2);
+      const hh=Math.min(holeHeight||edge*0.8, edge*1.8);
+      const hd=size.z+2;
+      const hole=new THREE.Mesh(new THREE.BoxGeometry(hw,hh,hd), new THREE.MeshBasicMaterial());
+      hole.position.set(-edge*0.25,-edge*0.25,0);
+      try{ const sub=CSG.subtract(toCSGReady(combined), toCSGReady(hole)); sub.geometry.computeVertexNormals(); sub.material=material; combined=sub; }
+      catch(err){ console.warn('CSG 挖孔失敗，退回未挖孔圖形：', err); }
+    }
+    mesh=combined;
+  } else {
+    mesh = new THREE.Mesh(new THREE.BoxGeometry(width,height,depth), material);
+  }
+
+  // 初始放到暫存區（穩定）
+  mesh.rotation.set(0,0,0);
+  mesh.position.set(0,0,0);
+  mesh.updateMatrixWorld(true);
+
+  if (!placeInStaging(mesh)) {
+    const b=getBoundsForArea('staging', new THREE.Vector3(1,1,1));
+    mesh.position.set(stagingPad.position.x, b.minY, stagingPad.position.z);
+    ensureInScene(mesh);
+    mesh.position.y = findRestingYForArea(mesh, 'staging', new THREE.Vector3(0.5,0.5,0.5));
+    clampIntoAreaBounds(mesh);
+  }
+  mesh.userData.type='custom'; mesh.userData.originalY=mesh.position.y;
+  renderVoidHUD();
+}
+
+/* =========================================================
+   滑鼠互動（拖曳/旋轉/抬升）
+========================================================= */
 let isDragging = false;
 let currentTarget = null;
 let offset = new THREE.Vector3();
@@ -2276,462 +1550,229 @@ const initialRot = new THREE.Euler();
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function liftOutOfOverlap(obj) {
-    const sb = new THREE.Box3().setFromObject(obj);
-    const s  = new THREE.Vector3(); sb.getSize(s);
-    const half = s.clone().multiplyScalar(0.5);
-
-    const area = getAreaByXZ(obj.position.x, obj.position.z) || 'container';
-    const b = getBoundsForArea(area, half);
-
-    const probe = obj.clone();
-    let y = THREE.MathUtils.clamp(obj.position.y, b.minY, b.maxY);
-    probe.position.set(obj.position.x, y, obj.position.z);
-
-    let guard = 0;
-    while (isOverlapping(probe, obj) && y <= b.maxY) {
-        y += 0.5;
-        probe.position.y = y;
-        if (++guard > 2000) break;
-    }
-    return y;
+  const sb=new THREE.Box3().setFromObject(obj);
+  const s=new THREE.Vector3(); sb.getSize(s);
+  const half=s.clone().multiplyScalar(0.5);
+  const area=getAreaByXZ(obj.position.x, obj.position.z) || 'container';
+  const b=getBoundsForArea(area, half);
+  const probe=obj.clone();
+  let y=THREE.MathUtils.clamp(obj.position.y, b.minY, b.maxY);
+  probe.position.set(obj.position.x, y, obj.position.z);
+  let guard=0;
+  while (isOverlapping(probe, obj) && y<=b.maxY){ y+=0.5; probe.position.y=y; if (++guard>2000) break; }
+  return y;
 }
 
 renderer.domElement.addEventListener('mousedown', (event) => {
-    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
 
-    const intersects = raycaster.intersectObjects(objects, true);
-    if (intersects.length === 0 ) {
-        if (event.button === 0 && !event.shiftKey) {
-            selectedObj = null;
-            showSelection(null);
-        }
-        return;
+  const intersects = raycaster.intersectObjects(objects, true);
+  if (intersects.length === 0 ) {
+    if (event.button === 0 && !event.shiftKey) {
+      selectedObj = null;
+      showSelection(null);
     }
-    currentTarget = intersects[0].object;
-    while (currentTarget.parent && !currentTarget.userData.type) {
-        currentTarget = currentTarget.parent;
-    }
-    selectedObj = currentTarget;
-    showSelection(selectedObj);
+    return;
+  }
+  currentTarget = intersects[0].object;
+  while (currentTarget.parent && !currentTarget.userData.type) currentTarget = currentTarget.parent;
+  selectedObj = currentTarget; showSelection(selectedObj);
 
-    if (event.button === 0 && event.shiftKey && selectedObj) {
-        isRotating = true;
-        rotateStart.set(event.clientX, event.clientY);
-        initialRot.copy(selectedObj.rotation);
-        controls.enabled = false;
-        return;
-    } 
+  if (event.button === 0 && event.shiftKey && selectedObj) {
+    isRotating = true;
+    rotateStart.set(event.clientX, event.clientY);
+    initialRot.copy(selectedObj.rotation);
+    controls.enabled = false;
+    return;
+  }
+  if (event.button === 0) {
+    const jumpHeight = 10;
+    const targBox = new THREE.Box3().setFromObject(currentTarget);
+    const tsize = new THREE.Vector3(); targBox.getSize(tsize);
+    const half = tsize.clone().multiplyScalar(0.5);
+    const areaNow = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+    const originalY = findRestingYForArea(currentTarget, areaNow, half);
 
-    if (event.button === 0) {
-        const jumpHeight = 10;
-        const targBox = new THREE.Box3().setFromObject(currentTarget);
-        const tsize = new THREE.Vector3(); targBox.getSize(tsize);
-        const half = tsize.clone().multiplyScalar(0.5);
-        const areaNow = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
-        const originalY = findRestingYForArea(currentTarget, areaNow, half);
-
-        const jumpUp = new TWEEN.Tween(currentTarget.position)
-            .to({ y: originalY + jumpHeight }, 150)
-            .easing(TWEEN.Easing.Quadratic.Out);
-
-        const fallDown = new TWEEN.Tween(currentTarget.position)
-            .to({ y: originalY }, 300)
-            .easing(TWEEN.Easing.Bounce.Out);
-        jumpUp.chain(fallDown).start();
-    }
-
-    if (event.button === 2) {
-        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-        raycaster.ray.intersectPlane(plane, planeIntersect);
-        offset.copy(planeIntersect).sub(currentTarget.position);
-        isDragging = true;
-        lastMouseY = event.clientY;        
-    }
+    const jumpUp = new TWEEN.Tween(currentTarget.position).to({ y: originalY + jumpHeight }, 150).easing(TWEEN.Easing.Quadratic.Out);
+    const fallDown = new TWEEN.Tween(currentTarget.position).to({ y: originalY }, 300).easing(TWEEN.Easing.Bounce.Out);
+    jumpUp.chain(fallDown).start();
+  }
+  if (event.button === 2) {
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    raycaster.ray.intersectPlane(plane, planeIntersect);
+    offset.copy(planeIntersect).sub(currentTarget.position);
+    isDragging = true;
+    lastMouseY = event.clientY;
+  }
 });
-
 renderer.domElement.addEventListener('mouseup', () => {
-    isDragging = false;
-    currentTarget = null;
-    if (isRotating) {
-        isRotating = false;
-        controls.enabled = true;
-    }
-    if (selectedObj) {
-        const sb = new THREE.Box3().setFromObject(selectedObj);
-        const s = new THREE.Vector3();
-        sb.getSize(s);
-        const half = s.clone().multiplyScalar(0.5);
-        const area = getAreaByXZ(selectedObj.position.x, selectedObj.position.z) || 'container';
-        if (!spaceDown) {
-            selectedObj.position.y = findRestingYForArea(selectedObj, area, half);
-        } else {
-            selectedObj.position.y = liftOutOfOverlap(selectedObj);
-        }
-    }
-    renderVoidHUD();
+  isDragging = false;
+  currentTarget = null;
+  if (isRotating) { isRotating = false; controls.enabled = true; }
+  if (selectedObj) clampIntoAreaBounds(selectedObj); // ⭐ 放手時強制扣邊 + 找落點
+  renderVoidHUD(); // 放手才更新（避免拖曳卡頓）
 });
-
 renderer.domElement.addEventListener('mousemove',(event) =>{
-    if (isRotating && selectedObj) {
-        const dx = event.clientX - rotateStart.x;
-        const dy = event.clientY - rotateStart.y;
-        selectedObj.rotation.y = initialRot.y + dx * 0.01;
-        selectedObj.rotation.x = THREE.MathUtils.clamp(initialRot.x + dy * 0.01, -Math.PI/2, Math.PI/2);
-        if (selectionHelper) selectionHelper.update();
-        return;
-    }
-    if (!isDragging || !currentTarget) return;
-    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
-    const targetBox = new THREE.Box3().setFromObject(currentTarget);
-    const targetSize = new THREE.Vector3();
-    targetBox.getSize(targetSize);
-    const halfSize = targetSize.clone().multiplyScalar(0.5);
-    if (!spaceDown) {
-        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-        if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
-            const newPos = planeIntersect.clone().sub(offset);
-            const area = getAreaByXZ(newPos.x, newPos.z) || getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
-            const b = getBoundsForArea(area, halfSize);
-            newPos.x = THREE.MathUtils.clamp(newPos.x, b.minX, b.maxX);
-            newPos.z = THREE.MathUtils.clamp(newPos.z, b.minZ, b.maxZ);
-            const testBox = currentTarget.clone();
-            testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
-            if (!isOverlapping(testBox, currentTarget)) {
-                currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
-            }
-        }
-      } else {
-      // spaceDown === true ：垂直拖曳
-      const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
-      const targetBox = new THREE.Box3().setFromObject(currentTarget);
-      const targetSize = new THREE.Vector3(); targetBox.getSize(targetSize);
-      const halfSize = targetSize.clone().multiplyScalar(0.5);
+  if (isRotating && selectedObj) {
+    const dx = event.clientX - rotateStart.x;
+    const dy = event.clientY - rotateStart.y;
+    selectedObj.rotation.y = initialRot.y + dx * 0.01;
+    selectedObj.rotation.x = THREE.MathUtils.clamp(initialRot.x + dy * 0.01, -Math.PI/2, Math.PI/2);
+    if (selectionHelper) selectionHelper.update();
+    return;
+  }
+  if (!isDragging || !currentTarget) return;
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const targetBox=new THREE.Box3().setFromObject(currentTarget);
+  const targetSize=new THREE.Vector3(); targetBox.getSize(targetSize);
+  const halfSize=targetSize.clone().multiplyScalar(0.5);
+
+  if (!spaceDown) {
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
+      const newPos = planeIntersect.clone().sub(offset);
+      const area = getAreaByXZ(newPos.x, newPos.z) || getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
       const b = getBoundsForArea(area, halfSize);
-
-      const dy = (lastMouseY - event.clientY) * 0.1;
-      let tryY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
-
-      // ★ 檢查：垂直位移也不能重疊
-      const probe = currentTarget.clone();
-      probe.position.set(currentTarget.position.x, tryY, currentTarget.position.z);
-      if (!isOverlapping(probe, currentTarget)) {
-        currentTarget.position.y = tryY;
-      } else {
-        // 若會重疊，往上提到剛好不重疊
-        currentTarget.position.y = liftOutOfOverlap(currentTarget);
-      }
-      lastMouseY = event.clientY;
+      newPos.x = THREE.MathUtils.clamp(newPos.x, b.minX, b.maxX);
+      newPos.z = THREE.MathUtils.clamp(newPos.z, b.minZ, b.maxZ);
+      const testBox = currentTarget.clone();
+      testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
+      if (!isOverlapping(testBox, currentTarget)) currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
+      clampIntoAreaBounds(currentTarget);
     }
+  } else {
+    const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+    const b = getBoundsForArea(area, halfSize);
+    const dy = (lastMouseY - event.clientY) * 0.1;
+    let tryY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
+
+    const probe=currentTarget.clone();
+    probe.position.set(currentTarget.position.x, tryY, currentTarget.position.z);
+    if (!isOverlapping(probe, currentTarget)) currentTarget.position.y = tryY;
+    else currentTarget.position.y = liftOutOfOverlap(currentTarget);
+    clampIntoAreaBounds(currentTarget);
+    lastMouseY = event.clientY;
+  }
+  // 🚫 拖曳中不更新 HUD，避免卡頓
 });
 
 function nudgeSelectedByArrow(code) {
-    if (!isDragging || !selectedObj) return;
-    const step = 0.5;
-    const containerBox = new THREE.Box3().setFromObject(container);
-    const sb = new THREE.Box3().setFromObject(selectedObj);
-    const size = new THREE.Vector3(); 
-    sb.getSize(size);
-    const half = size.clone().multiplyScalar(0.5);
-    const area = getAreaByXZ(selectedObj.position.x, selectedObj.position.z) || 'container';
-    const b = getBoundsForArea(area, half);
-    let nx = selectedObj.position.x;
-    let ny = selectedObj.position.y;
-    let nz = selectedObj.position.z;
-    if (spaceDown) {
-        if (code === 'ArrowUp') ny += step;
-        if (code === 'ArrowDown') ny -= step;
-    } else {
-        if (code === 'ArrowLeft') nx -= step;
-        if (code === 'ArrowRight') nx += step;
-        if (code === 'ArrowUp') nz -= step;
-        if (code === 'ArrowDown') nz += step;
-    }
-    nx = THREE.MathUtils.clamp(nx, b.minX, b.maxX);
-    ny = THREE.MathUtils.clamp(ny, b.minY, b.maxY);
-    nz = THREE.MathUtils.clamp(nz, b.minZ, b.maxZ);
-    const test = selectedObj.clone();
-    test.position.set(nx, ny, nz);
-    if (!isOverlapping(test, selectedObj)) {
-        selectedObj.position.set(nx, ny, nz);
-    }
+  if (!isDragging || !selectedObj) return;
+  const step = 0.5;
+  const sb = new THREE.Box3().setFromObject(selectedObj);
+  const size = new THREE.Vector3(); sb.getSize(size);
+  const half = size.clone().multiplyScalar(0.5);
+  const area = getAreaByXZ(selectedObj.position.x, selectedObj.position.z) || 'container';
+  const b = getBoundsForArea(area, half);
+  let nx = selectedObj.position.x, ny = selectedObj.position.y, nz = selectedObj.position.z;
+  if (spaceDown) { if (code==='ArrowUp') ny+=step; if (code==='ArrowDown') ny-=step; }
+  else { if (code==='ArrowLeft') nx-=step; if (code==='ArrowRight') nx+=step; if (code==='ArrowUp') nz-=step; if (code==='ArrowDown') nz+=step; }
+  nx = THREE.MathUtils.clamp(nx, b.minX, b.maxX);
+  ny = THREE.MathUtils.clamp(ny, b.minY, b.maxY);
+  nz = THREE.MathUtils.clamp(nz, b.minZ, b.maxZ);
+  const test=selectedObj.clone(); test.position.set(nx,ny,nz);
+  if (!isOverlapping(test, selectedObj)) { selectedObj.position.set(nx,ny,nz); clampIntoAreaBounds(selectedObj); }
 }
-
 window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
-    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.code)) {
-        nudgeSelectedByArrow(e.code);
-        e.preventDefault();
-    }
+  if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.code)) { nudgeSelectedByArrow(e.code); e.preventDefault(); }
 });
 window.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceDown = false; });
 
 renderer.domElement.addEventListener('wheel', (event) => {
-    const zoomSpeed = 1.1;
-    const dir = new THREE.Vector3();
-    camera.getWorldDirection(dir);
-    const step = (event.deltaY < 0 ? -1 : 1) * 5;
-    camera.position.addScaledVector(dir, step * zoomSpeed);
+  const zoomSpeed = 1.1;
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  const step = (event.deltaY < 0 ? -1 : 1) * 5; camera.position.addScaledVector(dir, step * zoomSpeed);
 });
 
-document.getElementById('shapeType').addEventListener('change', (e) => {
-    const value = e.target.value;
-    updateParamVisibility(value);
-});
-
-document.getElementById('hasHole').addEventListener('change', (e) => {
-    updateParamVisibility();
-});
-
+/* =========================================================
+   表單/按鈕事件
+========================================================= */
+document.getElementById('shapeType').addEventListener('change', (e) => { updateParamVisibility(e.target.value); });
+document.getElementById('hasHole').addEventListener('change', () => { updateParamVisibility(); });
 document.getElementById('generate').addEventListener('click', () => {
-    const type = document.getElementById('shapeType').value;
-    const color = normalizeColor(document.getElementById('color').value);
-    const hasHole = document.getElementById('hasHole').checked;
-    const holeWidth = parseFloat(document.getElementById('holeWidth').value || 0);
-    const holeHeight = parseFloat(document.getElementById('holeHeight').value || 0);
+  const type=document.getElementById('shapeType').value;
+  const color=normalizeColor(document.getElementById('color').value);
+  const hasHole=document.getElementById('hasHole').checked;
+  const holeWidth=parseFloat(document.getElementById('holeWidth').value || 0);
+  const holeHeight=parseFloat(document.getElementById('holeHeight').value || 0);
+  const holeTypeUI=document.getElementById('holeType')?.value;
+  const holeAxisUI=document.getElementById('holeAxis')?.value;
+  const holeType=(holeTypeUI || defaultHoleTypeByShape(type, hasHole));
+  const holeAxis=(holeAxisUI || 'z').toLowerCase();
 
-    const holeTypeUI = document.getElementById('holeType')?.value;
-    const holeAxisUI = document.getElementById('holeAxis')?.value;
-    const holeType = (holeTypeUI || defaultHoleTypeByShape(type, hasHole));
-    const holeAxis = (holeAxisUI || 'z').toLowerCase();
+  let width=20, height=20, depth=20;
+  if (type==='cube'){ width=parseFloat(document.getElementById('boxWidth').value || 20); height=parseFloat(document.getElementById('boxHeight').value || 20); depth=parseFloat(document.getElementById('boxDepth').value || 20); }
+  else if (type==='circle'){ width=parseFloat(document.getElementById('sphereWidth').value || 20); height=width; depth=width; }
+  else if (type==='lshape'){ const unit=parseFloat(document.getElementById('customWidth').value || 20); width=unit; height=unit; depth=unit; }
+  else if (TETROMINO_TYPES.has(type)){ width=parseFloat(document.getElementById('boxWidth').value || 20); height=depth=width; }
 
-    let width = 20, height = 20, depth = 20;
-    if (type === 'cube') {
-        width = parseFloat(document.getElementById('boxWidth').value || 20);
-        height = parseFloat(document.getElementById('boxHeight').value || 20);
-        depth = parseFloat(document.getElementById('boxDepth').value || 20);
-    } else if (type === 'circle') {
-        width = parseFloat(document.getElementById('sphereWidth').value || 20);
-        height = width;
-        depth = width;
-    } else if (type === 'lshape') {
-        const unit = parseFloat(document.getElementById('customWidth').value || 20);
-        width  = unit;
-        height = unit;
-        depth  = unit;
-    } else if (TETROMINO_TYPES.has(type)) {
-        width = parseFloat(document.getElementById('boxWidth').value || 20);
-        height = depth = width;
-    }
-    addToLibrary({ type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType, holeAxis });
-    createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType, holeAxis);
-    clearFormFields();
+  addToLibrary({ type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType, holeAxis });
+  createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType, holeAxis);
+  clearFormFields();
 });
+document.getElementById('optimizeBtn')?.addEventListener('click', () => { packToTheMax(); });
+document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => { annealRunning = false; ConvergenceChart.stop(); });
 
+/* =========================================================
+   動畫/Resize
+========================================================= */
 function animate(time) {
-    requestAnimationFrame( animate );
-    controls.update();
-    if (TWEEN && typeof TWEEN.update === 'function') TWEEN.update(time);
-    if (selectionHelper && selectedObj) selectionHelper.update();
-    renderer.render( scene, camera );
+  requestAnimationFrame( animate );
+  controls.update();
+  if (TWEEN && typeof TWEEN.update === 'function') TWEEN.update(time);
+  if (selectionHelper && selectedObj) selectionHelper.update();
+  renderer.render( scene, camera );
 }
 animate();
-
 window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  placeOptimizePanelBelowChart();
 });
 
-window.addEventListener('DOMContentLoaded', () => {
-    updateParamVisibility();
-    ensureSceneButtons();
-    renderVoidHUD();
-});
-
-// === 🔹 時間切片：避免長迴圈卡畫面 ===
-function makeTimeSlicer(budgetMs = 12) {
-  let last = performance.now();
-  return async function slice() {
-    const now = performance.now();
-    if (now - last >= budgetMs) {
-      await new Promise(r => setTimeout(r, 0));
-      last = performance.now();
-    }
-  };
-}
-
-// ---- 讓動畫不阻塞 UI（若你還沒定義它）
-async function uiYield() { return new Promise(r => requestAnimationFrame(() => r())); }
-
-// ---- 點擊行為（統一入口）：有 autoPackMaxUtilization 就用它，否則就跑 runAnnealing
-async function onOptimizeClick(e){
-  e?.preventDefault?.();
-  try{
-    console.log('[OPT] click', { objects: objects.length, annealRunning });
-    if (annealRunning) { uiToast?.('最佳化已在進行中'); return; }
-    if (!objects?.length) { uiToast?.('目前沒有物體可最佳化'); return; }
-
-    if (typeof autoPackMaxUtilization === 'function') {
-      await autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.5, ultraFactor: 0.33, steps: 9000 });
-    } else if (typeof runAnnealing === 'function') {
-      await runAnnealing({ steps: 8000, initTemp: 120, cooling: 0.996, baseStep: 5, baseAngle: Math.PI/12 });
-    } else {
-      console.error('[OPT] 找不到最佳化函式');
-      uiToast?.('找不到最佳化函式');
-    }
-  } catch (err) {
-    console.error('[OPT] 執行錯誤', err);
-    uiToast?.('最佳化發生錯誤（詳見 console）');
-  }
-}
-
-// 先處理暫存區物體：由大到小依序嘗試放入藍色容器；失敗就放回暫存區
-async function stageFirstLargest(options = {}) {
-  const staged = objects.filter(o => areaOf(o) === 'staging');
-  if (!staged.length) return;
-
-  // 由大到小
-  const ranked = staged
-    .map(o => ({ o, vol: worldVolumeOfObject(o) }))
-    .sort((a, b) => b.vol - a.vol)
-    .map(x => x.o);
-
-  uiToast(`暫存區 ${ranked.length} 件：由大到小嘗試入箱`);
-  for (const m of ranked) {
-    // 重置姿勢，避免舊姿勢卡住
-    resetPose(m);
-
-    // 依序用粗→細的步距嘗試放入（保持不重疊、不越界）
-    let ok =
-      placeInsideContainer(m, { stepScale: 1.0,  padding: 0.04, angles: RIGHT_ANGLES }) ||
-      placeInsideContainer(m, { stepScale: 0.55, padding: 0.02, angles: RIGHT_ANGLES }) ||
-      placeInsideContainer(m, { stepScale: 0.33, padding: 0.02, angles: RIGHT_ANGLES });
-
-    if (!ok) {
-      // 放不進去就回暫存區，不中止流程，繼續下一件
-      placeInStaging(m);
-    }
-
-    await uiYield();
-  }
-
+/* =========================================================
+   啟動/載入 OBB & 辨識器
+========================================================= */
+window.addEventListener('DOMContentLoaded', async () => {
+  updateParamVisibility();
+  ensureSceneButtons();
   renderVoidHUD();
-}
+  try { const mod = await import('three/examples/jsm/math/OBB.js'); OBBClass = mod.OBB; console.log('[OBB] loaded'); }
+  catch (e) { console.warn('[OBB] not available, using fallback', e); }
+  if (UNDER_AUTOMATION) { renderLibrary(); return; }
+  const recognize = await createRecognizer();
+  document.getElementById('recognizeBtn').addEventListener('click', () => {
+    recognize((result) => {
+      addToLibrary(result);
+      const set = (id, val) => {
+        const el = document.getElementById(id);
+        if (el && val !== undefined && val !== null && val !== '') {
+          el.value = val;
+          if (id === 'color') el.dispatchEvent(new Event('input'));
+        }
+      };
+      document.getElementById('shapeType').value = result.type;
+      document.getElementById('shapeType').dispatchEvent(new Event('change'));
+      set("color", result.color);
+      if (TETROMINO_TYPES.has(result.type)) set("boxWidth", result.width);
+      else if (result.type === "cube") { set("boxWidth", result.width); set("boxHeight", result.height); set("boxDepth", result.depth); }
+      else if (result.type === "circle") set("sphereWidth", result.width);
+      else if (result.type === "lshape") { document.getElementById('customWidth').value = result.width || 20; set("boxWidth", result.width); }
 
-// ====== 塞到最滿：一鍵流程 ======
-async function packToTheMax() {
-  if (annealRunning) { uiToast('請先停止正在進行的最佳化'); return; }
-  if (!objects.length) { uiToast('目前沒有物體'); return; }
+      const canHole = !TETROMINO_TYPES.has(result.type);
+      const holeChk = document.getElementById('hasHole');
+      if (holeChk) { holeChk.checked = canHole && !!result.hasHole; holeChk.dispatchEvent(new Event('change')); }
+      if (canHole && result.hasHole) { set('holeWidth',  result.holeWidth); set('holeHeight', result.holeHeight); }
 
-  LIGHTWEIGHT_METRICS = true;
-  await stageFirstLargest();
-  
-  // 🔧 提升體素精度（能量評分更準）——真正作用於 packingEnergy
-  const _oldPACK = PACK_VOXEL_RES;
-  PACK_VOXEL_RES = 18;   // 原本 12，提到 18（可視效能調整 16~24）
-
-  // (A) 先大後小：和你現有的流程一致，但我們多試一次「更細步距」
-  await autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.45, ultraFactor: 0.28, steps: 11000 });
-
-  // (B) 把暫存區仍未入箱的物件再試一次
-  const staged = objects.filter(o => (getAreaByXZ(o.position.x, o.position.z) === 'staging'));
-  if (staged.length) uiToast(`再嘗試塞入剩餘 ${staged.length} 件`);
-  for (const m of staged) {
-    // 重置姿態，三段細掃（更細）
-    resetPose(m);
-    let ok = placeInsideContainer(m, { stepScale: 0.55, padding: 0.02 })
-          || placeInsideContainer(m, { stepScale: 0.33, padding: 0.02 })
-          || placeInsideContainer(m, { stepScale: 0.22, padding: 0.015 });
-    if (!ok) {
-      // 仍不行就維持在暫存區
-      placeInStaging(m);
-    }
-    await uiYield();
-  }
-
-  // (C) 強化壓實 + 微擾「封箱」讓邊角更貼齊
-  globalCompaction(3);
-  shakeAndSettle(3);
-
-  // 針對每個物件試四個直角朝向取最小能量（快速版本）
-  for (const o of objects) { tryBestAxisOrientation_Y(o); o.position.y = findRestingY(o); }
-
-  // 再跑一小輪退火 + 輕壓實
-  await runAnnealing({ steps: 6000, initTemp: 80, cooling: 0.998, baseStep: 2, baseAngle: Math.PI/18 });
-  globalCompaction(2);
-
-  // (D) 顯示成果
-  const r = measureBlueVoid();
-  uiToast(`完成：容積利用率 ${(100 - r.emptyRatio*100).toFixed(1)}%`);
-  renderVoidHUD();
-
-  // 還原體素解析度，避免之後太吃效能
-  PACK_VOXEL_RES = _oldPACK;
-  LIGHTWEIGHT_METRICS = false;
-}
-
-/* function bindOptimizeButtons(){
-  const btn  = document.getElementById('optimizeBtn');
-  const stop = document.getElementById('stopOptimizeBtn');
-  if (!btn) { console.warn('[OPT] 找不到 #optimizeBtn'); return; }
-
-  btn.addEventListener('click', onOptimizeClick);
-  stop?.addEventListener('click', () => {
-    annealRunning = false;
-    try { ConvergenceChart?.stop?.(); } catch {}
-    uiToast?.('已停止最佳化');
-  });
-  console.log('[OPT] 按鈕事件已綁定');
-}
-
-// 無論腳本早或晚載，都會綁到
-if (document.readyState === 'loading') {
-  window.addEventListener('DOMContentLoaded', bindOptimizeButtons, { once:true });
-} else {
-  bindOptimizeButtons();
-} */
-
-(async () => {
-    try { const mod = await import('three/examples/jsm/math/OBB.js'); OBBClass = mod.OBB; console.log('[OBB] loaded'); }
-    catch (e) { console.warn('[OBB] not available, using fallback', e); }
-    if (UNDER_AUTOMATION) { renderLibrary(); return; } 
-    const recognize = await createRecognizer();
-    document.getElementById('recognizeBtn').addEventListener('click', () => {
-        recognize((result) => {
-            addToLibrary(result);
-            const set = (id, val) => {
-                const el = document.getElementById(id);
-                if (el && val !== undefined && val !== null && val !== '') {
-                    el.value = val;
-                    if (id === 'color') {
-                        el.dispatchEvent(new Event('input'));
-                    }
-                }
-            };
-            document.getElementById('shapeType').value = result.type;
-            document.getElementById('shapeType').dispatchEvent(new Event('change'));
-            set("color", result.color); 
-            if (TETROMINO_TYPES.has(result.type)) {
-                set("boxWidth", result.width);
-            } else if (result.type === "cube") {
-                set("boxWidth", result.width);
-                set("boxHeight", result.height);
-                set("boxDepth", result.depth);
-            } else if (result.type === "circle") {
-                set("sphereWidth", result.width);
-            } else if (result.type === "lshape") {
-                document.getElementById('customWidth').value = result.width || 20;
-                set("boxWidth", result.width);
-            }
-            const canHole = !TETROMINO_TYPES.has(result.type);
-            const holeChk = document.getElementById('hasHole');
-            if (holeChk) {
-                holeChk.checked = canHole && !!result.hasHole;
-                holeChk.dispatchEvent(new Event('change')); 
-            }
-            if (canHole && result.hasHole) {
-                set('holeWidth',  result.holeWidth);
-                set('holeHeight', result.holeHeight);
-            }
-            setTimeout(() => {
-                document.getElementById("generate").click();
-                setTimeout(clearFormFields, 500);
-            }, 100);
-        });
+      setTimeout(() => { document.getElementById("generate").click(); setTimeout(clearFormFields, 500); }, 100);
     });
-    renderLibrary();
-})();
+  });
+  renderLibrary();
+});
