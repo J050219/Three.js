@@ -15,7 +15,7 @@ let playingTimeline = false;
 let LIGHTWEIGHT_METRICS = false;
 
 // HUD：永遠走輕量估算 + 節流
-let HUD_LIGHTWEIGHT = true;
+let HUD_LIGHTWEIGHT = false;
 const HUD_THROTTLE_MS = 500;
 let _hudNext = 0;
 
@@ -583,21 +583,76 @@ function _solidVolumeViaVoxel() {
   const solidRatio=insideCount/total; const solidVol=volContainer*solidRatio;
   return { containerVolume:volContainer, solidVolume:solidVol };
 }
-function measureBlueVoid() {
-  if (!LIGHTWEIGHT_METRICS) {
+/* function measureBlueVoid() {
+  const box = new THREE.Box3().setFromObject(container); // ✅ 只看藍色容器
+  const containerVolume = (box.max.x - box.min.x) * (box.max.y - box.min.y) * (box.max.z - box.min.z);
+
+  const objsInside = objects.filter(o => {
+    const b = new THREE.Box3().setFromObject(o);
+    return b.min.x >= box.min.x && b.max.x <= box.max.x &&
+           b.min.y >= box.min.y && b.max.y <= box.max.y &&
+           b.min.z >= box.min.z && b.max.z <= box.max.z;
+  });
+
+  let solidVolume = 0;
+  for (const o of objsInside) {
     try {
-      const r=_solidVolumeViaCSG();
-      if (r){ const empty=Math.max(0, r.containerVolume-r.solidVolume);
-        return { emptyVolume:empty, emptyRatio: r.containerVolume>0? empty/r.containerVolume:0, containerVolume:r.containerVolume, solidVolume:r.solidVolume };
-      }
+      const g = o.geometry.clone();
+      g.applyMatrix4(o.matrixWorld);
+      const mesh = new THREE.Mesh(g);
+      const csg = ThreeCSG.fromMesh(mesh);
+      solidVolume += Math.abs(csg.calcVolume());
     } catch {}
   }
-  const v=_solidVolumeViaVoxel();
-  if (v){
-    const empty=Math.max(0, v.containerVolume-v.solidVolume);
-    return { emptyVolume:empty, emptyRatio: v.containerVolume>0? empty/v.containerVolume:0, containerVolume:v.containerVolume, solidVolume:v.solidVolume };
+
+  const emptyRatio = 1 - solidVolume / containerVolume;
+  return { emptyRatio, containerVolume, solidVolume };
+} */
+function measureBlueVoid() {
+  // ✅ 僅計算藍色容器內的體積與空隙
+  const containerBox = new THREE.Box3().setFromObject(container);
+  const containerVolume =
+    (containerBox.max.x - containerBox.min.x) *
+    (containerBox.max.y - containerBox.min.y) *
+    (containerBox.max.z - containerBox.min.z);
+
+  // 🟦 找出所有與藍色容器相交的物體
+  const objsInside = objects.filter(o => {
+    const b = new THREE.Box3().setFromObject(o);
+    // 排除紅色暫存區及其他外部物體
+    const stagingBox = new THREE.Box3().setFromObject(stagingFrame);
+    if (b.intersectsBox(stagingBox)) return false;
+    // 若物體與藍色容器相交則計算
+    return b.intersectsBox(containerBox);
+  });
+
+  // 🧮 計算這些物體在藍色容器中所佔體積
+  let solidVolume = 0;
+  for (const o of objsInside) {
+    try {
+      // 取物體幾何形狀
+      const geom = o.geometry.clone();
+      geom.applyMatrix4(o.matrixWorld);
+      const mesh = new THREE.Mesh(geom);
+
+      // ✳️ 與容器內部做交集，避免算出超出部分
+      const containerMesh = toCSGReady(container.clone());
+      const objMesh = toCSGReady(mesh);
+      const clipped = CSG.intersect(objMesh, containerMesh);
+      solidVolume += Math.abs(_meshWorldVolume(clipped));
+    } catch (err) {
+      // 若 CSG 失敗則 fallback
+      const b = new THREE.Box3().setFromObject(o);
+      const vol =
+        (b.max.x - b.min.x) *
+        (b.max.y - b.min.y) *
+        (b.max.z - b.min.z);
+      solidVolume += vol * 0.8; // 假設 80% 位於內部
+    }
   }
-  return { emptyVolume:0, emptyRatio:0, containerVolume:0, solidVolume:0 };
+
+  const emptyRatio = Math.max(0, 1 - solidVolume / containerVolume);
+  return { emptyRatio, containerVolume, solidVolume };
 }
 
 /* =========================================================
@@ -1162,38 +1217,34 @@ function placeInStaging(mesh) {
   const half=size.clone().multiplyScalar(0.5);
 
   const bounds=getBoundsForArea('staging', half);
-  const grid=mesh.userData?.unit || null;
+  /* const grid=mesh.userData?.unit || null;
   const step=grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
-  const snap=(v,g)=> g?Math.round(v/g)*g:v;
+  const snap=(v,g)=> g?Math.round(v/g)*g:v; */
+  let x = bounds.minX;
+  let z = bounds.minZ;
+  let y = bounds.minY + half.y;
+  let layerHeight = size.y;
 
+  const stepX = size.x + 2;
+  const stepZ = size.z + 2;
   let placed=false;
   outer:
-  for (let z=bounds.minZ; z<=bounds.maxZ+1e-6; z+=step){
-    for (let x=bounds.minX; x<=bounds.maxX+1e-6; x+=step){
-      for (const ay of RIGHT_ANGLES){
-        mesh.rotation.set(0, ay, 0);
-        mesh.position.set(snap(x, grid), 0, snap(z, grid));
-        mesh.position.y = findRestingYForArea(mesh, 'staging', half);
-
-        const sb=new THREE.Box3().setFromObject(mesh);
-        const inside= sb.min.x>=bounds.minX-1e-3 && sb.max.x<=bounds.maxX+1e-3 &&
-                      sb.min.z>=bounds.minZ-1e-3 && sb.max.z<=bounds.maxZ+1e-3 &&
-                      sb.min.y>=bounds.minY-1e-3 && sb.max.y<=bounds.maxY+1e-3;
-        if (!inside) continue;
-        if (isOverlapping(mesh, mesh)) continue;
-
-        placed=true; break outer;
+  for (let j = 0; j < 100 && !placed; j++) {
+    for (let i = 0; i < 100 && !placed; i++) {
+      mesh.position.set(x + i * stepX, y, z + j * stepZ);
+      mesh.position.y = findRestingYForArea(mesh, 'staging', half);
+      clampIntoAreaBounds(mesh);
+      if (!isOverlapping(mesh)) {
+        ensureInScene(mesh);
+        placed = true;
+        break outer;
       }
     }
   }
   if (!placed) {
-    mesh.position.set(stagingPad.position.x, bounds.minY, stagingPad.position.z);
-    mesh.position.y = findRestingYForArea(mesh, 'staging', half);
-    clampIntoAreaBounds(mesh);
-    if (isOverlapping(mesh)) { console.warn('暫存區已滿或放置失敗'); return false; }
+    console.warn('暫存區已滿或放置失敗');
+    return false;
   }
-  ensureInScene(mesh);
-  clampIntoAreaBounds(mesh);
   renderVoidHUD();
   return true;
 }
@@ -1716,8 +1767,6 @@ document.getElementById('generate').addEventListener('click', () => {
   createCube(type, width, height, depth, color, hasHole, holeWidth, holeHeight, holeType, holeAxis);
   clearFormFields();
 });
-document.getElementById('optimizeBtn')?.addEventListener('click', () => { packToTheMax(); });
-document.getElementById('stopOptimizeBtn')?.addEventListener('click', () => { annealRunning = false; ConvergenceChart.stop(); });
 
 /* =========================================================
    動畫/Resize
@@ -1776,3 +1825,5 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
   renderLibrary();
 });
+window.packToTheMax = packToTheMax;
+window.stopAnnealing = stopAnnealing;

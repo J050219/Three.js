@@ -18,18 +18,21 @@
     <style>
       * { box-sizing: border-box; }
       body { margin: 0; overflow: hidden; background: black; font-family: system-ui, sans-serif; }
-      #optBar{
+      #optBar {
         position: fixed;
-        top: 8px;
+        top: 10px;
         left: 50%;
         transform: translateX(-50%);
         z-index: 10000;
         display: flex;
+        justify-content: center;
+        align-items: center;
         gap: 10px;
-        padding: 6px 10px;
+        padding: 6px 12px;
         background: rgba(30,30,30,0.35);
         border-radius: 10px;
         backdrop-filter: blur(6px);
+        pointer-events: auto;
       }
       #optBar .btn{
         font-size: 14px;
@@ -92,10 +95,12 @@
     </style>
   </head>
   <body>
+    <!-- 🔹 新增按鈕區 -->
     <div id="optBar">
       <button id="optimizeBtn" class="btn">最佳化擺放</button>
       <button id="stopOptimizeBtn" class="btn ghost">停止最佳化</button>
     </div>
+
     <div id="ui">
         <label>
             選擇圖形：
@@ -141,7 +146,28 @@
           <div id="libraryList"></div>
         </aside>
         <img id="video" src="/get-camera-frame" alt="攝影機畫面" />
+
+        <!-- 主程式 -->
         <script type="module" src="/static/main.js"></script>
+
+        <!-- 🔹 新增按鈕事件邏輯 -->
+        <script>
+          window.addEventListener('DOMContentLoaded', () => {
+            const optBtn = document.getElementById('optimizeBtn');
+            const stopBtn = document.getElementById('stopOptimizeBtn');
+
+            optBtn?.addEventListener('click', () => {
+              if (typeof packToTheMax === 'function') packToTheMax();
+            });
+
+            stopBtn?.addEventListener('click', () => {
+              if (typeof stopAnnealing === 'function') stopAnnealing();
+              if (window.ConvergenceChart && typeof ConvergenceChart.stop === 'function')
+                ConvergenceChart.stop();
+            });
+          });
+        </script>
+
         <script>
         function placeLibrary() {
           const ui = document.getElementById('ui');
