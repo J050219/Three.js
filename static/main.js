@@ -944,7 +944,12 @@ function isOverlapping(ncandidate, ignore = null) {
   const sameArea = areaOf(ncandidate);
   for (const obj of objects) {
     if (obj === ignore) continue;
-    if (areaOf(obj) !== sameArea) continue;
+    /* if (areaOf(obj) !== sameArea) continue; */
+        // 🟡 球體：跨區域也要檢查
+    if (!ncandidate.userData?.isSphere && !obj.userData?.isSphere) {
+      if (areaOf(obj) !== sameArea) continue;
+    }
+
 
     const otherMeshes=[]; obj.updateMatrixWorld(true);
     obj.traverse(n=>{ if (n.isMesh) otherMeshes.push(n); });
@@ -1223,7 +1228,7 @@ function placeInStaging(mesh) {
   let x = bounds.minX;
   let z = bounds.minZ;
   let y = bounds.minY + half.y;
-  let layerHeight = size.y;
+  /* let layerHeight = size.y; */
 
   const stepX = size.x + 2;
   const stepZ = size.z + 2;
@@ -1579,7 +1584,42 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
     mesh.position.y = findRestingYForArea(mesh, 'staging', new THREE.Vector3(0.5,0.5,0.5));
     clampIntoAreaBounds(mesh);
   }
-  mesh.userData.type='custom'; mesh.userData.originalY=mesh.position.y;
+    // 🟥 所有新物體一律放入紅色暫存區
+  /* mesh.rotation.set(0, 0, 0);
+  mesh.position.set(0,0,0);
+  mesh.updateMatrixWorld(true);
+
+  // 先確保加入 scene（否則 isOverlapping() 檢查不到）
+  ensureInScene(mesh);
+
+  
+ // === 🟢 固定堆疊角設定（紅框左後角） ===
+const stagingBox = new THREE.Box3().setFromObject(stagingFrame);
+const FIXED_X = stagingBox.min.x + 5;   // 可微調 5 為邊距（避免穿模）
+const FIXED_Z = stagingBox.min.z + 5;
+const BASE_Y  = stagingPad.position.y;
+
+// === 🔹 計算物體尺寸 ===
+const box = new THREE.Box3().setFromObject(mesh);
+const size = new THREE.Vector3(); box.getSize(size);
+const half = size.clone().multiplyScalar(0.5);
+
+// === 🔹 找出目前此角堆疊高度 ===
+let maxY = BASE_Y;
+for (const o of objects) {
+  if (!o.geometry) continue;
+  const ob = new THREE.Box3().setFromObject(o);
+  if (Math.abs(ob.min.x - FIXED_X) < 5 && Math.abs(ob.min.z - FIXED_Z) < 5) {
+    if (ob.max.y > maxY) maxY = ob.max.y;
+  }
+}
+
+// === 🔹 所有物體（球體也包含）統一從角落堆疊 ===
+mesh.position.set(FIXED_X + half.x, maxY + half.y, FIXED_Z + half.z);
+mesh.updateMatrixWorld(true); */
+
+  mesh.userData.type = 'custom';
+  mesh.userData.originalY = mesh.position.y;
   renderVoidHUD();
 }
 
