@@ -3,15 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as ThreeCSG from 'three-csg-ts';
 import { createRecognizer } from './recognizer.js';
 import * as TWEEN from '@tweenjs/tween.js';
-/* =========================================================
-   Smart Diffusion 背景（Offscreen Shader → 動態材質）
-   用法：
-   const _bg = createSmartDiffusion(renderer);
-   在 animate(time) 裡每幀：
-     const mx = (window._lastMouseX ?? innerWidth*0.5) / innerWidth;
-     const my = (window._lastMouseY ?? innerHeight*0.5) / innerHeight;
-     scene.background = _bg.update(time*0.001, new THREE.Vector2(mx, 1.0 - my));
-========================================================= */
+
 let _bg = null; 
 function createSmartDiffusion(renderer){
   const rt = new THREE.WebGLRenderTarget(512, 512, { depthBuffer:false, stencilBuffer:false });
@@ -261,10 +253,7 @@ function createWarehouseBackground(scene, renderer, opts = {}) {
   return { refreshEnvironment(){ cubeCam.update(renderer, scene); } };
 }
 
-
-/* =========================================================
-   全域旗標 & 常數
-========================================================= */
+//全域旗標 & 常數
 let placementTimeline = [];
 let playingTimeline = false;
 
@@ -314,9 +303,7 @@ _collideRaycaster.firstHitOnly = false;
 const STAGING_PADDING = 2.0;
 const COLLISION_EPS   = 0.0;
 
-/* =========================================================
-   UI：提示/面板/曲線
-========================================================= */
+//UI：提示/面板/曲線
 function uiToast(msg, ms = 1400) {
   let el = document.getElementById('toast');
   if (!el) {
@@ -344,11 +331,8 @@ function uiToast(msg, ms = 1400) {
     pointerEvents: 'auto'
   });
 })();
-// ...（中略：其餘 UI/最佳化面板/圖表等保持不變）
 
-/* =========================================================
-   場景初始化
-========================================================= */
+//場景初始化
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
@@ -363,9 +347,6 @@ addEventListener('mousemove', (e) => {
   window._lastMouseX = e.clientX;
   window._lastMouseY = e.clientY;
 });
-
-
-// ❌（刪除）原本這行：const warehouse = createWarehouseBackground(scene, renderer);
 
 camera.position.set(150, 150, 150);
 camera.lookAt(0, 45, 0);
@@ -446,20 +427,7 @@ stagingFrame.add(new THREE.LineSegments(
 ));
 scene.add(stagingFrame);
 
-/* ======= 後續所有函式/事件監聽/最佳化/碰撞/產生幾何/拖曳交互 =======
-   👇 全部保留你原本的實作不變（從 Library 與工具開始到最後）
-   下面直接貼回你的原始程式（未更動部分） —— 為了篇幅這裡不再重複；
-   你可以把「上面改動到 stagingFrame 這段」替換到你的檔案，
-   其餘從 Library 起的內容照舊放在後面即可。
-*/
-
-// ……（把你後面原本的程式從「Library 與工具」一路到檔尾完整保留）……
-
-
-
-/* =========================================================
-   Library 與工具
-========================================================= */
+//Library 與工具
 function typeLabel(t) {
   switch (t) {
     case 'tI': return 'I 形方塊';
@@ -562,211 +530,308 @@ function _meshWorldVolume(mesh){
 }
 function worldVolumeOfObject(root){ let sum=0; root.updateMatrixWorld(true); root.traverse(n=>{ if(n.isMesh) sum+=_meshWorldVolume(n); }); return sum; }
 
-/* =========================================================
-   容器內部體積 & 空隙估算（優先體素法）
-========================================================= */
+
+//容器內部體積 & 空隙估算（KD-Tree 加速版）
+
+// 1) 取得「容器內部實心盒」：從托盤上緣到藍箱頂部
 function _interiorMeshSolid() {
   const cb = new THREE.Box3().setFromObject(container);
   const palletTop = pallet.position.y + pallet.geometry.parameters.height / 2;
-  const w = cb.max.x - cb.min.x, h = cb.max.y - palletTop, d = cb.max.z - cb.min.z;
+
+  const w = cb.max.x - cb.min.x;
+  const h = cb.max.y - palletTop;
+  const d = cb.max.z - cb.min.z;
   if (h <= 0) return null;
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial());
-  m.position.set((cb.min.x + cb.max.x)/2, palletTop + h/2, (cb.min.z + cb.max.z)/2);
+
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshBasicMaterial()
+  );
+  m.position.set(
+    (cb.min.x + cb.max.x) / 2,
+    palletTop + h / 2,
+    (cb.min.z + cb.max.z) / 2
+  );
   m.updateMatrixWorld(true);
   return m;
 }
-function _clipToInteriorCSG(obj, interiorMesh) {
-  try {
-    const a = new THREE.Box3().setFromObject(obj);
-    const b = new THREE.Box3().setFromObject(interiorMesh);
-    if (!a.intersectsBox(b)) return null;
 
-    const parts = [];
-    obj.updateMatrixWorld(true);
-    obj.traverse(n => { if (n.isMesh && n.geometry) parts.push(toCSGReady(n)); });
-    if (!parts.length) return null;
-
-    let acc = parts[0];
-    for (let i = 1; i < parts.length; i++) {
-      try { acc = CSG.union(acc, parts[i]); } catch {}
-    }
-    const clipped = CSG.intersect(acc, toCSGReady(interiorMesh));
-    clipped.updateMatrixWorld(true);
-    return clipped;
-  } catch { return null; }
-}
-function _batchUnion(meshes) {
-  if (!meshes.length) return null;
-  let current = meshes[0];
-  for (let i = 1; i < meshes.length; i++) {
-    try { current = CSG.union(current, meshes[i]); }
-    catch {
-      const batch = [];
-      for (let k = i; k < Math.min(meshes.length, i + CSG_MAX_BATCH); k++) batch.push(meshes[k]);
-      try {
-        let bacc = batch[0];
-        for (let t = 1; t < batch.length; t++) bacc = CSG.union(bacc, batch[t]);
-        current = CSG.union(current, bacc);
-        i += (batch.length - 1);
-      } catch {}
-    }
-  }
-  current.updateMatrixWorld(true);
-  return current;
-}
-function _solidVolumeViaCSG() {
-  const interior = _interiorMeshSolid();
-  if (!interior) return null;
-
-  const inside = [];
-  for (const o of objects) {
-    if (USE_ONLY_CONTAINER && areaOf(o) !== 'container') continue;
-    const clipped = _clipToInteriorCSG(o, interior);
-    if (clipped) inside.push(clipped);
-  }
-  const containerVol = _meshWorldVolume(toCSGReady(interior));
-  if (!inside.length) return { containerVolume: containerVol, solidVolume: 0 };
-
-  const merged = _batchUnion(inside);
-  if (!merged) return null;
-
-  const solid = _meshWorldVolume(merged);
-  return { containerVolume: containerVol, solidVolume: Math.max(0, Math.min(solid, containerVol)) };
-}
+// 把場景 matrixWorld 全部更新一次
 function _syncWorld() {
-  // 把場景 & 所有物件的 matrixWorld 強制刷新
   scene.updateMatrixWorld(true);
   for (const o of objects) o.updateMatrixWorld(true);
   container.updateMatrixWorld(true);
   pallet.updateMatrixWorld(true);
 }
 
-// ★ 取得「從點 p、朝向 dir」在 limitBox(=藍箱內部)內能走到離開盒子的最遠距離
-function _rayMaxDistInsideBox(p, dir, limitBox) {
-  if (!limitBox) return Infinity;
-  const ray = new THREE.Ray(p.clone(), dir.clone().normalize());
-  const exit = ray.intersectBox(limitBox, new THREE.Vector3());
-  if (!exit) return 0; // 原則上在盒內必定有出口；保底 0 代表不計命中
-  return exit.distanceTo(p);
+// 2) KD-Tree 三角形結構
+class KDNode {
+  constructor(tris, depth = 0) {
+    this.axis = depth % 3;       // 0:x,1:y,2:z
+    this.left = null;
+    this.right = null;
+    this.tris = [];
+    this.bbox = new THREE.Box3();
+
+    for (const t of tris) this.bbox.union(t.bbox);
+
+    const MAX_TRIS = 16;
+    const MAX_DEPTH = 32;
+
+    if (tris.length <= MAX_TRIS || depth >= MAX_DEPTH) {
+      this.tris = tris;
+    } else {
+      // 依照當前 axis 排序，切成左右兩半
+      tris.sort((a, b) => a.center.getComponent(this.axis) - b.center.getComponent(this.axis));
+      const mid = tris.length >> 1;
+      const leftTris = tris.slice(0, mid);
+      const rightTris = tris.slice(mid);
+
+      this.left = new KDNode(leftTris, depth + 1);
+      this.right = new KDNode(rightTris, depth + 1);
+    }
+  }
+
+  // 收集與 ray 有交集的所有交點距離 t
+  rayIntersect(ray, hits, tMax) {
+    const tmp = _kdTmpVec0;
+    if (!ray.intersectBox(this.bbox, tmp)) return;
+
+    if (this.tris.length) {
+      for (const tri of this.tris) {
+        const t = rayIntersectTriangle(ray.origin, ray.direction, tri, tMax);
+        if (t !== null) hits.push(t);
+      }
+    } else {
+      if (this.left) this.left.rayIntersect(ray, hits, tMax);
+      if (this.right) this.right.rayIntersect(ray, hits, tMax);
+    }
+  }
 }
 
-// 只判定「容器內這一塊空間」是否被任何物體佔據
-// limitBox: THREE.Box3（容器內部的範圍）→ 只對 intersects 的物體做奇偶檢測
-// 只在藍色容器(=limitBox)內做奇偶檢測；命中距離必須 <= 盒內段長 (tMax)
-function _pointInsideAnyObject(p, rayDir = new THREE.Vector3(1,0,0), limitBox = null) {
-  _syncWorld(); 
-  // 只看藍色容器區域物體
-  let candidates = objects.filter(o => areaOf(o) === 'container');
+// KD tree 暫存用的幾個共用向量
+const _kdTmpVec0 = new THREE.Vector3();
+const _kdTmpVec1 = new THREE.Vector3();
+const _kdTmpVec2 = new THREE.Vector3();
+const _kdTmpVec3 = new THREE.Vector3();
+const _kdTmpVec4 = new THREE.Vector3();
+const _kdTmpVec5 = new THREE.Vector3();
 
-  // 只保留與容器內部盒有相交的物體
-  if (limitBox) {
-    candidates = candidates.filter(o => {
-      const bb = new THREE.Box3().setFromObject(o);
-      return bb.intersectsBox(limitBox);
+// 3) Möller-Trumbore ray vs triangle 相交測試
+//    回傳 t（>0）代表 ray(t) = 命中；否則回傳 null
+function rayIntersectTriangle(origin, dir, tri, tMax) {
+  const EPS = 1e-8;
+
+  const a = tri.a, b = tri.b, c = tri.c;
+  const edge1 = _kdTmpVec1.subVectors(b, a);
+  const edge2 = _kdTmpVec2.subVectors(c, a);
+
+  const pvec = _kdTmpVec3.crossVectors(dir, edge2);
+  const det = edge1.dot(pvec);
+  if (Math.abs(det) < EPS) return null;
+
+  const invDet = 1.0 / det;
+  const tvec = _kdTmpVec4.subVectors(origin, a);
+  const u = tvec.dot(pvec) * invDet;
+  if (u < 0 || u > 1) return null;
+
+  const qvec = _kdTmpVec5.crossVectors(tvec, edge1);
+  const v = dir.dot(qvec) * invDet;
+  if (v < 0 || u + v > 1) return null;
+
+  const t = edge2.dot(qvec) * invDet;
+  if (t <= EPS) return null;
+  if (tMax !== undefined && t > tMax + 1e-6) return null;
+  return t;
+}
+
+// 4) 從「藍箱內所有物體」建 KD-Tree
+function buildContainerKDTree(limitBox) {
+  _syncWorld();
+  const tris = [];
+
+  const tri = new THREE.Triangle();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const tBox = new THREE.Box3();
+
+  for (const obj of objects) {
+    if (areaOf(obj) !== 'container') continue;
+
+    obj.updateMatrixWorld(true);
+    obj.traverse(mesh => {
+      if (!mesh.isMesh || !mesh.geometry || !mesh.geometry.attributes?.position) return;
+      const geom = mesh.geometry;
+      const pos = geom.attributes.position;
+      const index = geom.index ? geom.index.array : null;
+      const mat = mesh.matrixWorld;
+
+      if (index) {
+        for (let i = 0; i < index.length; i += 3) {
+          a.fromBufferAttribute(pos, index[i]).applyMatrix4(mat);
+          b.fromBufferAttribute(pos, index[i + 1]).applyMatrix4(mat);
+          c.fromBufferAttribute(pos, index[i + 2]).applyMatrix4(mat);
+          tri.set(a, b, c);
+
+          tBox.setFromPoints([a, b, c]);
+          if (!tBox.intersectsBox(limitBox)) continue;
+
+          tris.push({
+            a: a.clone(),
+            b: b.clone(),
+            c: c.clone(),
+            bbox: tBox.clone(),
+            center: tri.getMidpoint(new THREE.Vector3())
+          });
+        }
+      } else {
+        // non-indexed 幾何
+        for (let i = 0; i < pos.count; i += 3) {
+          a.fromBufferAttribute(pos, i).applyMatrix4(mat);
+          b.fromBufferAttribute(pos, i + 1).applyMatrix4(mat);
+          c.fromBufferAttribute(pos, i + 2).applyMatrix4(mat);
+          tri.set(a, b, c);
+
+          tBox.setFromPoints([a, b, c]);
+          if (!tBox.intersectsBox(limitBox)) continue;
+
+          tris.push({
+            a: a.clone(),
+            b: b.clone(),
+            c: c.clone(),
+            bbox: tBox.clone(),
+            center: tri.getMidpoint(new THREE.Vector3())
+          });
+        }
+      }
     });
   }
-  if (candidates.length === 0) return false;
 
-  // 先做球體快速內含檢測（p 落在球內即算佔據）
-  for (const o of candidates) {
-    if (o.userData?.isSphere) {
-      const { center, r } = getWorldSphereFromMesh(o);
-      if (center.distanceToSquared(p) <= r*r) return true;
-    }
-  }
+  if (!tris.length) return null;
+  return new KDNode(tris, 0);
+}
 
-  // ★ 算出這條射線在藍箱內的有效上限距離
-  const tMax = _rayMaxDistInsideBox(p, rayDir, limitBox);
-  if (tMax <= 1e-6) return false;
+// 5) 用 KD-Tree 做「點在任何物體內部？」判斷
+const _voidRay = new THREE.Ray();
+const _voidDir = new THREE.Vector3(1, 0, 0);
 
-  // 射線奇偶；僅計算距離 <= tMax 的命中（避免盒外誤計）
-  _collideRaycaster.set(p, rayDir.clone().normalize());
-  const hits = _collideRaycaster.intersectObjects(candidates, true);
-  if (!hits || hits.length === 0) return false;
+function _pointInsideAnyObjectKD(p, kdRoot, limitBox) {
+  if (!kdRoot) return false;
 
-  let count = 0;
-  let lastD = -1;
+  // 找出 ray 從 p 出發往 +X 方向，在容器盒內的最大距離 tMax
+  _voidRay.origin.copy(p);
+  _voidRay.direction.copy(_voidDir);
+
+  const exit = _voidRay.intersectBox(limitBox, _kdTmpVec0);
+  if (!exit) return false;
+  const tMax = exit.distanceTo(p);
+
+  const hits = [];
+  kdRoot.rayIntersect(_voidRay, hits, tMax);
+  if (!hits.length) return false;
+
+  hits.sort((a, b) => a - b);
   const EPSD = 1e-6;
+  let count = 0;
+  let lastT = -1;
 
-  for (const h of hits) {
-    // 只統計「盒內段」的命中
-    if (h.distance > tMax + EPSD) continue;
-    if (h.distance < EPSD) continue;              // 略過靠近起點的抖動
-    if (lastD < 0 || Math.abs(h.distance - lastD) > EPSD) {
+  for (const t of hits) {
+    if (t <= EPSD || t > tMax + EPSD) continue;
+    if (lastT < 0 || Math.abs(t - lastT) > EPSD) {
       count++;
-      lastD = h.distance;
+      lastT = t;
     }
   }
+  // 奇偶規則：奇數 = 在實心內部
   return (count % 2) === 1;
 }
 
+// 6) 體素 + KD-Tree 估算「藍箱實心體積」
+function _solidVolumeViaVoxelKD() {
+  const interior = _interiorMeshSolid();
+  if (!interior) return null;
 
-function _solidVolumeViaVoxel() {
-  const interior = _interiorMeshSolid(); if (!interior) return null;
   const ibox = new THREE.Box3().setFromObject(interior);
-  const volContainer = (ibox.max.x-ibox.min.x)*(ibox.max.y-ibox.min.y)*(ibox.max.z-ibox.min.z);
 
-  const nx=VOID_VOXEL_RES, ny=VOID_VOXEL_RES, nz=VOID_VOXEL_RES;
-  const dx=(ibox.max.x-ibox.min.x)/nx, dy=(ibox.max.y-ibox.min.y)/ny, dz=(ibox.max.z-ibox.min.z)/nz;
+  const nx = VOID_VOXEL_RES;
+  const ny = VOID_VOXEL_RES;
+  const nz = VOID_VOXEL_RES;
 
-  let insideCount=0, total=nx*ny*nz;
-  const p=new THREE.Vector3(); const ray=new THREE.Vector3(1,0,0);
+  const dx = (ibox.max.x - ibox.min.x) / nx;
+  const dy = (ibox.max.y - ibox.min.y) / ny;
+  const dz = (ibox.max.z - ibox.min.z) / nz;
 
-  if (VOID_MC_SAMPLES>0){
-    total=VOID_MC_SAMPLES;
-    for (let s=0;s<VOID_MC_SAMPLES;s++){
-      p.set(
-        THREE.MathUtils.lerp(ibox.min.x, ibox.max.x, Math.random()),
-        THREE.MathUtils.lerp(ibox.min.y, ibox.max.y, Math.random()),
-        THREE.MathUtils.lerp(ibox.min.z, ibox.max.z, Math.random())
-      );
-      if (_pointInsideAnyObject(p, ray, ibox)) insideCount++;
-    }
-  } else {
-    for (let j=0;j<ny;j++){
-      const y=ibox.min.y+(j+0.5)*dy;
-      for (let k=0;k<nz;k++){
-        const z=ibox.min.z+(k+0.5)*dz;
-        for (let i=0;i<nx;i++){
-          const x=ibox.min.x+(i+0.5)*dx; p.set(x,y,z);
-          if (_pointInsideAnyObject(p, ray, ibox)) insideCount++;
-        }
+  const volContainer =
+    (ibox.max.x - ibox.min.x) *
+    (ibox.max.y - ibox.min.y) *
+    (ibox.max.z - ibox.min.z);
+
+  // 建立 KD-Tree（只看藍箱內物體）
+  const kdRoot = buildContainerKDTree(ibox);
+
+  if (!kdRoot) {
+    // 容器內完全沒有物體
+    return { containerVolume: volContainer, solidVolume: 0 };
+  }
+
+  let insideCount = 0;
+  const p = new THREE.Vector3();
+
+  for (let j = 0; j < ny; j++) {
+    const y = ibox.min.y + (j + 0.5) * dy;
+    for (let k = 0; k < nz; k++) {
+      const z = ibox.min.z + (k + 0.5) * dz;
+      for (let i = 0; i < nx; i++) {
+        const x = ibox.min.x + (i + 0.5) * dx;
+        p.set(x, y, z);
+        if (_pointInsideAnyObjectKD(p, kdRoot, ibox)) insideCount++;
       }
     }
   }
-  const solidRatio=insideCount/total; const solidVol=volContainer*solidRatio;
-  return { containerVolume:volContainer, solidVolume:solidVol };
+
+  const total = nx * ny * nz;
+  const solidRatio = insideCount / total;
+  const solidVol = volContainer * solidRatio;
+
+  return { containerVolume: volContainer, solidVolume: solidVol };
 }
-// ✅ 預設使用體素版（顯著省時）；必要時可把 PERF.USE_CSG_VOID=true 再呼叫一次
+
+// 7) 對外介面：measureBlueVoid / HUD 顯示
 function measureBlueVoid() {
   _syncWorld();
-  if (PERF.USE_CSG_VOID) {
-    const r = _solidVolumeViaCSG();
-    if (r) {
-      const emptyRatio = Math.max(0, 1 - r.solidVolume / r.containerVolume);
-      return { emptyRatio, containerVolume: r.containerVolume, solidVolume: r.solidVolume };
-    }
-  }
-  const r2 = _solidVolumeViaVoxel();
-  if (!r2) return { emptyRatio: 1, containerVolume: 1, solidVolume: 0 };
-  const emptyRatio = Math.max(0, 1 - r2.solidVolume / r2.containerVolume);
-  return { emptyRatio, containerVolume: r2.containerVolume, solidVolume: r2.solidVolume };
+  const r = _solidVolumeViaVoxelKD();
+  if (!r) return { emptyRatio: 1, containerVolume: 1, solidVolume: 0 };
+
+  const emptyRatio = Math.max(0, 1 - r.solidVolume / r.containerVolume);
+  return {
+    emptyRatio,
+    containerVolume: r.containerVolume,
+    solidVolume: r.solidVolume
+  };
 }
+
 function ensureVoidHUD() {
   let el = document.getElementById('voidHud');
   if (el) return el;
   el = document.createElement('div');
   el.id = 'voidHud';
   Object.assign(el.style, {
-    position: 'fixed', right: '12px', bottom: '12px',
-    background: 'rgba(0,0,0,.65)', color: '#fff',
-    padding: '8px 10px', borderRadius: '8px',
-    fontFamily: 'system-ui, sans-serif', fontSize: '12px',
+    position: 'fixed',
+    right: '12px',
+    bottom: '12px',
+    background: 'rgba(0,0,0,.65)',
+    color: '#fff',
+    padding: '8px 10px',
+    borderRadius: '8px',
+    fontFamily: 'system-ui, sans-serif',
+    fontSize: '12px',
     zIndex: 9999
   });
   document.body.appendChild(el);
   return el;
 }
+
 function renderVoidHUD() {
   const now = performance.now();
   if (now < _hudNext) return;
@@ -774,26 +839,28 @@ function renderVoidHUD() {
 
   const prev = LIGHTWEIGHT_METRICS;
   if (HUD_LIGHTWEIGHT) LIGHTWEIGHT_METRICS = true;
+
   const r = measureBlueVoid();
+
   LIGHTWEIGHT_METRICS = prev;
 
   const hud = ensureVoidHUD();
-  hud.textContent = `空隙 ${ (r.emptyRatio*100).toFixed(1) }%`;
+  hud.textContent = `空隙 ${(r.emptyRatio * 100).toFixed(1)}%`;
 }
+
 function showVoidStats() {
   const prev = LIGHTWEIGHT_METRICS;
   LIGHTWEIGHT_METRICS = false;
   const r = measureBlueVoid();
   LIGHTWEIGHT_METRICS = prev;
-  const msg = `空隙 ${(r.emptyRatio*100).toFixed(1)}%`;
+
+  const msg = `空隙 ${(r.emptyRatio * 100).toFixed(1)}%`;
   console.log('[Blue-Container Void]', r, msg);
   uiToast(msg, 2200);
   renderVoidHUD();
 }
 
-/* =========================================================
-   幾何檢測：OBB/球體/回退（關閉預設 CSG 碰撞）
-========================================================= */
+//幾何檢測：OBB/球體/回退（關閉預設 CSG 碰撞）
 function isPointInsideMesh(p, mesh) {
   _collideRaycaster.set(p, new THREE.Vector3(1,0,0));
   const hits = _collideRaycaster.intersectObject(mesh, true);
@@ -952,7 +1019,7 @@ function isOverlapping(ncandidate, ignore = null) {
         // 幾何回退：角點內外檢測（比之前更保守）
         if (meshesReallyIntersect_Fallback(cm, om)) return true;
 
-        // ★★ 最終裁決（嚴謹）：CSG 相交 > 0 體積即視為重疊
+        // 最終裁決（嚴謹）：CSG 相交 > 0 體積即視為重疊
         if (PERF.USE_CSG_COLLISION && meshesReallyIntersect_CSG(cm, om)) return true;
       }
     }
@@ -960,10 +1027,7 @@ function isOverlapping(ncandidate, ignore = null) {
   return false;
 }
 
-
-/* =========================================================
-   ★ AABB 最小位移分離（MTV） & 解穿透（新增全域保險）
-========================================================= */
+// AABB 最小位移分離（MTV） & 解穿透（新增全域保險）
 function _aabb(mesh){ return new THREE.Box3().setFromObject(mesh); }
 // 回傳讓 a 與 b 分離的最小位移向量（軸對齊、只推 a）
 function _mtvAABB(aBox, bBox){
@@ -1023,9 +1087,7 @@ function resolvePenetrations(obj, maxIter = 20){
   return changed;
 }
 
-/* =========================================================
-   場景操作/放置/最佳化輔助
-========================================================= */
+//場景操作/放置/最佳化輔助
 const objects = [];
 let selectedObj = null;
 let selectionHelper = null;
@@ -1206,9 +1268,7 @@ function ensureInScene(o){ if (!o.parent) scene.add(o); if (!objects.includes(o)
 function resetPose(mesh){ mesh.rotation.set(0,0,0); mesh.position.set(0,0,0); mesh.updateMatrixWorld(true); }
 function dedupeObjects(){ const seen=new Set(); for (let i=objects.length-1;i>=0;i--){ const o=objects[i]; if (seen.has(o)) objects.splice(i,1); else seen.add(o);} }
 
-/* =========================================================
-   能量評分（體素）
-========================================================= */
+//能量評分（體素）
 function packingEnergy() {
   if (objects.length === 0) return 0;
   const cb=new THREE.Box3().setFromObject(container);
@@ -1256,9 +1316,7 @@ function packingEnergy() {
 function snapshotState(){ return objects.map(o=>({ obj:o, pos:o.position.clone(), rot:o.rotation.clone() })); }
 function restoreState(snap){ snap.forEach(s=>{ s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); }); }
 
-/* =========================================================
-   擺放/退火（核心邏輯與節流）
-========================================================= */
+//擺放/退火（核心邏輯與節流）
 function tryBestAxisOrientation_Y(obj){
   const beforePos=obj.position.clone(), beforeRot=obj.rotation.clone();
   let best={ energy:Infinity, rot:beforeRot.clone(), pos:beforePos.clone() };
@@ -1429,7 +1487,7 @@ function placeInsideContainer(mesh, opts = {}) {
   globalCompaction(3);
   shakeAndSettle();
 
-  // ★ 放定點後做一次解穿透（保險）
+  // 放定點後做一次解穿透（保險）
   resolvePenetrations(mesh);
   if (isOverlapping(mesh)) { return false; }
   renderVoidHUD();
@@ -1620,7 +1678,7 @@ async function runAnnealing(opts = {}) {
   objects.forEach(clampIntoAreaBounds);
   globalCompaction(2);
 
-  // ★ 全域保險：逐件解穿透
+  // 全域保險：逐件解穿透
   for (const o of objects) resolvePenetrations(o);
 
   renderVoidHUD();
@@ -1639,9 +1697,7 @@ function stopAnnealing() {
   showLoadingSpinner(false);
 }
 
-/* =========================================================
-   自動擺放流程（先大後小 + 暫存）
-========================================================= */
+//自動擺放流程（先大後小 + 暫存）
 async function uiYield(){ return new Promise(r => requestAnimationFrame(()=>r())); }
 
 async function stageFirstLargest(options = {}) {
@@ -1730,7 +1786,7 @@ async function packToTheMax() {
   await runAnnealing({ steps: 6000, initTemp: 80, cooling: 0.998, baseStep: 2, baseAngle: Math.PI/18 });
   globalCompaction(2);
 
-  // ★ 全域保險：逐件解穿透
+  // 全域保險：逐件解穿透
   for (const o of objects) resolvePenetrations(o);
 
   const r = measureBlueVoid();
@@ -1741,9 +1797,7 @@ async function packToTheMax() {
   LIGHTWEIGHT_METRICS = false;
 }
 
-/* =========================================================
-   產生幾何（cube/circle/tetromino/L-shape）
-========================================================= */
+//產生幾何（cube/circle/tetromino/L-shape）
 function defaultHoleTypeByShape(type, hasHole) { if (!hasHole) return 'none'; if (type==='circle') return 'cyl'; return 'box'; }
 function axisThickness(w,h,d,axis='y'){ axis=axis.toLowerCase(); return axis==='x'?w:axis==='y'?h:d; }
 function makeHoleMesh(opts={}) {
@@ -1842,7 +1896,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
   const mbox = new THREE.Box3().setFromObject(mesh);
   if (mbox.intersectsBox(cbox)) rescueToStaging(mesh);
 
-  // ★ 放定點後，做一次解穿透（保險）
+  // 放定點後，做一次解穿透（保險）
   resolvePenetrations(mesh);
 
   mesh.userData.type = 'custom';
@@ -1850,9 +1904,7 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
   renderVoidHUD();
 }
 
-/* =========================================================
-   滑鼠互動（拖曳/旋轉/抬升；全程不重疊 + 邊界約束）
-========================================================= */
+//滑鼠互動（拖曳/旋轉/抬升；全程不重疊 + 邊界約束）
 let isDragging = false;
 let currentTarget = null;
 let offset = new THREE.Vector3();
@@ -1938,7 +1990,7 @@ renderer.domElement.addEventListener('mouseup', () => {
   if (selectedObj) clampIntoAreaBounds(selectedObj);
 
   if (selectedObj) {
-    // ★ 解穿透；若還是重疊就退回最後安全位置
+    // 解穿透；若還是重疊就退回最後安全位置
     resolvePenetrations(selectedObj);
     if (isOverlapping(selectedObj, selectedObj) && lastSafePos) {
       selectedObj.position.copy(lastSafePos);
@@ -2044,9 +2096,7 @@ renderer.domElement.addEventListener('wheel', (event) => {
   const step = (event.deltaY < 0 ? -1 : 1) * 5; camera.position.addScaledVector(dir, step * zoomSpeed);
 });
 
-/* =========================================================
-   表單/按鈕事件
-========================================================= */
+//表單/按鈕事件
 document.getElementById('shapeType').addEventListener('change', (e) => { updateParamVisibility(e.target.value); });
 document.getElementById('hasHole').addEventListener('change', () => { updateParamVisibility(); });
 document.getElementById('generate').addEventListener('click', () => {
@@ -2071,9 +2121,7 @@ document.getElementById('generate').addEventListener('click', () => {
   clearFormFields();
 });
 
-/* =========================================================
-   動畫/Resize
-========================================================= */
+//動畫/Resize
 function animate(time) {
   requestAnimationFrame( animate );
   controls.update();
@@ -2097,9 +2145,7 @@ window.addEventListener('resize', () => {
   placeOptimizePanelBelowChart();
 });
 
-/* =========================================================
-   啟動/載入 OBB & 辨識器
-========================================================= */
+//啟動/載入 OBB & 辨識器
 window.addEventListener('DOMContentLoaded', async () => {
   updateParamVisibility();
   ensureSceneButtons();
