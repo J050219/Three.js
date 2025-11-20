@@ -288,7 +288,7 @@ const CSG_MAX_BATCH = 12;
 const USE_ONLY_CONTAINER = true;
 
 // 佈局體素解析度（能量計算）
-const VOXEL_RES = 10;
+const VOXEL_RES = 8;
 let PACK_VOXEL_RES = VOXEL_RES;
 
 // 效能策略旗標
@@ -331,6 +331,180 @@ function uiToast(msg, ms = 1400) {
     pointerEvents: 'auto'
   });
 })();
+/* ====== 最佳化 overlay / spinner / 進度 ====== */
+
+let _optOverlay    = null;
+let _optSubtitleEl = null;
+let _optProgressEl = null;
+let _optVoidEl     = null;
+
+/** 建立（或取得）最佳化 overlay + 轉圈圈 UI */
+function ensureOptimizeOverlay() {
+  if (_optOverlay) return _optOverlay;
+
+  const host = document.getElementById('optimizeOverlay') || document.createElement('div');
+  host.id = 'optimizeOverlay';
+  Object.assign(host.style, {
+    position: 'fixed',
+    inset: '0',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(0,0,0,0.35)',
+    zIndex: 10001,
+    pointerEvents: 'none',
+    opacity: '0',
+    transition: 'opacity 0.25s',
+    fontFamily: 'system-ui, sans-serif'
+  });
+
+  // 中央卡片
+  const card = document.createElement('div');
+  Object.assign(card.style, {
+    minWidth: '260px',
+    maxWidth: '320px',
+    padding: '14px 18px',
+    borderRadius: '12px',
+    background: 'rgba(15,18,26,0.92)',
+    color: '#fff',
+    boxShadow: '0 12px 30px rgba(0,0,0,0.4)',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px'
+  });
+
+  // 轉圈圈
+  const spinner = document.createElement('div');
+  Object.assign(spinner.style, {
+    width: '28px',
+    height: '28px',
+    borderRadius: '50%',
+    border: '3px solid rgba(255,255,255,0.18)',
+    borderTopColor: '#4da3ff',
+    animation: 'opt-spin 0.8s linear infinite'
+  });
+
+  // 文字區
+  const textBox = document.createElement('div');
+  textBox.style.flex = '1';
+
+  const title = document.createElement('div');
+  title.textContent = '最佳化擺放中…';
+  Object.assign(title.style, {
+    fontSize: '14px',
+    fontWeight: '600',
+    marginBottom: '4px'
+  });
+
+  _optSubtitleEl = document.createElement('div');
+  Object.assign(_optSubtitleEl.style, {
+    fontSize: '11px',
+    opacity: '0.9',
+    marginBottom: '6px'
+  });
+  _optSubtitleEl.textContent = '初始化中…';
+
+  // 進度條
+  const barOuter = document.createElement('div');
+  Object.assign(barOuter.style, {
+    width: '100%',
+    height: '4px',
+    borderRadius: '999px',
+    background: 'rgba(255,255,255,0.14)',
+    overflow: 'hidden',
+    marginBottom: '4px'
+  });
+
+  _optProgressEl = document.createElement('div');
+  Object.assign(_optProgressEl.style, {
+    width: '0%',
+    height: '100%',
+    background: 'linear-gradient(90deg,#4da3ff,#54e6ff)',
+    transition: 'width 0.18s ease-out'
+  });
+  barOuter.appendChild(_optProgressEl);
+
+  // 空隙顯示
+  _optVoidEl = document.createElement('div');
+  Object.assign(_optVoidEl.style, {
+    fontSize: '10px',
+    opacity: '0.8'
+  });
+
+  textBox.appendChild(title);
+  textBox.appendChild(_optSubtitleEl);
+  textBox.appendChild(barOuter);
+  textBox.appendChild(_optVoidEl);
+
+  card.appendChild(spinner);
+  card.appendChild(textBox);
+  host.innerHTML = '';
+  host.appendChild(card);
+
+  // 確定真的掛到 body 上
+  if (!host.parentElement) document.body.appendChild(host);
+
+  // 加上 spin 動畫（只要定義一次）
+  const styleId = 'optimize-spinner-style';
+  if (!document.getElementById(styleId)) {
+    const st = document.createElement('style');
+    st.id = styleId;
+    st.textContent = `
+      @keyframes opt-spin {
+        0%   { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
+  _optOverlay = host;
+  return host;
+}
+
+/** 顯示 / 隱藏「正在運算」圈圈 */
+function showLoadingSpinner(show) {
+  const host = ensureOptimizeOverlay();
+  host.style.pointerEvents = show ? 'auto' : 'none';
+  host.style.opacity       = show ? '1'   : '0';
+  // 用 display 避免一開始就擋住畫面
+  host.style.display       = show ? 'flex': 'none';
+}
+
+/** 統一給 runAnnealing 用的包裝（你原本已有 showOptimizePanel 呼叫） */
+function showOptimizePanel(show) {
+  showLoadingSpinner(show);
+}
+
+/** 更新狀態文字 / 進度條 / 空隙顯示 */
+function updateOptimizePanel(info = {}) {
+  ensureOptimizeOverlay();
+  const { step, total, subtitle, emptyPct } = info;
+
+  if (subtitle !== undefined && _optSubtitleEl) {
+    _optSubtitleEl.textContent = subtitle;
+  }
+
+  if (step !== undefined && total !== undefined && total > 0 && _optProgressEl) {
+    const ratio = Math.max(0, Math.min(1, step / total));
+    _optProgressEl.style.width = (ratio * 100).toFixed(1) + '%';
+  }
+
+  if (emptyPct !== undefined && _optVoidEl) {
+    _optVoidEl.textContent = `目前估計空隙約 ${emptyPct.toFixed(1)}%`;
+  }
+}
+
+/** 你在 resize 時有呼叫，這邊簡單留空即可 */
+function placeOptimizePanelBelowChart() {
+  // 目前 overlay 固定置中，不需要特別調整位置
+}
+
+/** 收斂曲線：這裡做成 no-op，就不增加額外開銷 */
+const ConvergenceChart = {
+  start() {},
+  stop() {}
+};
 
 //場景初始化
 const scene = new THREE.Scene();
@@ -1601,8 +1775,8 @@ async function runAnnealing(opts = {}) {
   updateOptimizePanel({ subtitle:'計算初始能量…' });
   ConvergenceChart.start();
 
-  const steps    = opts.steps    ?? 10000;
-  const initTemp = opts.initTemp ?? 120;
+  const steps    = opts.steps    ?? 6500;
+  const initTemp = opts.initTemp ?? 110;
   const cooling  = opts.cooling  ?? 0.997;
   const baseStep = opts.baseStep ?? 4;
 
@@ -1765,7 +1939,7 @@ async function packToTheMax() {
   const _oldPACK = PACK_VOXEL_RES;
   PACK_VOXEL_RES = 18;
 
-  await autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.45, ultraFactor: 0.28, steps: 11000 });
+  await autoPackMaxUtilization({ bigRatio: 0.6, fineFactor: 0.45, ultraFactor: 0.28, steps: 7500 });
 
   const staged = objects.filter(o => (getAreaByXZ(o.position.x, o.position.z) === 'staging'));
   if (staged.length) uiToast(`再嘗試塞入剩餘 ${staged.length} 件`);
@@ -1783,7 +1957,7 @@ async function packToTheMax() {
   shakeAndSettle(3);
   for (const o of objects) { tryBestAxisOrientation_Y(o); o.position.y = findRestingY(o); clampIntoAreaBounds(o); }
 
-  await runAnnealing({ steps: 6000, initTemp: 80, cooling: 0.998, baseStep: 2, baseAngle: Math.PI/18 });
+  await runAnnealing({ steps: 4000, initTemp: 80, cooling: 0.998, baseStep: 2, baseAngle: Math.PI/18 });
   globalCompaction(2);
 
   // 全域保險：逐件解穿透
