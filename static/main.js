@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as ThreeCSG from 'three-csg-ts';
 import { createRecognizer } from './recognizer.js';
 import * as TWEEN from '@tweenjs/tween.js';
+import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 
 let _bg = null; 
 function createSmartDiffusion(renderer){
@@ -1287,19 +1288,89 @@ function clearAllObjects() {
   if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
   renderVoidHUD();
 }
+// ===== 匯出 GLB =====
+function exportPackingToGLB() {
+  const exporter = new GLTFExporter();
+
+  // 1) 做一個只放「重要東西」的 root
+  const root = new THREE.Group();
+  root.name = 'PackingScene';
+
+  // 托盤 / 藍箱 / 紅區 底座 + 框
+  root.add(pallet.clone(true));
+  root.add(container.clone(true));
+  root.add(stagingPad.clone(true));
+  root.add(stagingFrame.clone(true));
+
+  // 所有目前場景中的物件（使用者加進去的那些）
+  objects.forEach(o => {
+    const clone = o.clone(true);
+    root.add(clone);
+  });
+
+  root.updateMatrixWorld(true);
+
+  // 2) 匯出成 GLB（二進位 glTF）
+  exporter.parse(
+    root,
+    (result) => {
+      const blob = new Blob([result], { type: 'model/gltf-binary' });
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'packing_scene.glb';   // 檔名你可改
+      link.click();
+
+      URL.revokeObjectURL(url);
+      uiToast('已匯出 GLB：packing_scene.glb');
+    },
+    {
+      binary: true,          // ⭐ 關鍵：true = .glb
+      onlyVisible: true,
+      truncateDrawRange: true,
+      embedImages: true
+    }
+  );
+}
+
+// 也順便掛到 window，方便你從 console 手動呼叫
+window.exportPackingToGLB = exportPackingToGLB;
+
 function ensureSceneButtons() {
   const ui = document.getElementById('ui'); if (!ui) return;
   if (!document.getElementById('deleteSelectedBtn')) {
-    const b1 = document.createElement('button'); b1.id='deleteSelectedBtn'; b1.textContent='刪除選取'; b1.style.marginLeft='8px'; ui.appendChild(b1);
+    const b1 = document.createElement('button'); 
+    b1.id='deleteSelectedBtn'; 
+    b1.textContent='刪除選取'; 
+    b1.style.marginLeft='8px'; 
+    ui.appendChild(b1);
     b1.addEventListener('click', deleteSelected);
   }
   if (!document.getElementById('clearAllBtn')) {
-    const b2 = document.createElement('button'); b2.id='clearAllBtn'; b2.textContent='清空容器'; b2.style.marginLeft='8px'; ui.appendChild(b2);
+    const b2 = document.createElement('button'); 
+    b2.id='clearAllBtn'; 
+    b2.textContent='清空容器'; 
+    b2.style.marginLeft='8px'; 
+    ui.appendChild(b2);
     b2.addEventListener('click', clearAllObjects);
   }
   if (!document.getElementById('voidBtn')) {
-    const b3=document.createElement('button'); b3.id='voidBtn'; b3.textContent='估算空隙'; b3.style.marginLeft='8px'; ui.appendChild(b3);
+    const b3=document.createElement('button'); 
+    b3.id='voidBtn'; 
+    b3.textContent='估算空隙'; 
+    b3.style.marginLeft='8px'; 
+    ui.appendChild(b3);
     b3.addEventListener('click', showVoidStats);
+  }
+  // ⭐ 新增：匯出 GLB 按鈕
+  if (!document.getElementById('exportGLBBtn')) {
+    const b4 = document.createElement('button');
+    b4.id = 'exportGLBBtn';
+    b4.textContent = '匯出 GLB';
+    b4.style.marginLeft = '8px';
+    ui.appendChild(b4);
+    b4.addEventListener('click', exportPackingToGLB);
   }
 }
 addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected(); });
