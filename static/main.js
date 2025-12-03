@@ -1288,91 +1288,95 @@ function clearAllObjects() {
   if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
   renderVoidHUD();
 }
-// ===== 匯出 GLB =====
-function exportPackingToGLB() {
+function exportPackingToGLTF() {
   const exporter = new GLTFExporter();
 
-  // 1) 做一個只放「重要東西」的 root
   const root = new THREE.Group();
   root.name = 'PackingScene';
 
-  // 托盤 / 藍箱 / 紅區 底座 + 框
-  root.add(pallet.clone(true));
-  root.add(container.clone(true));
-  root.add(stagingPad.clone(true));
-  root.add(stagingFrame.clone(true));
+  // 這些變數在你的程式裡本來就有
+  if (typeof pallet !== 'undefined')       root.add(pallet.clone(true));
+  if (typeof container !== 'undefined')    root.add(container.clone(true));
+  if (typeof stagingPad !== 'undefined')   root.add(stagingPad.clone(true));
+  if (typeof stagingFrame !== 'undefined') root.add(stagingFrame.clone(true));
 
-  // 所有目前場景中的物件（使用者加進去的那些）
-  objects.forEach(o => {
-    const clone = o.clone(true);
-    root.add(clone);
-  });
+  if (Array.isArray(objects)) {
+    objects.forEach(o => root.add(o.clone(true)));
+  }
 
   root.updateMatrixWorld(true);
 
-  // 2) 匯出成 GLB（二進位 glTF）
   exporter.parse(
     root,
     (result) => {
-      const blob = new Blob([result], { type: 'model/gltf-binary' });
-      const url = URL.createObjectURL(blob);
+      // ⭐ 這裡一定要先變成 JSON 字串
+      const json = JSON.stringify(result);
+      const blob = new Blob([json], { type: 'application/json' });
 
+      const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'packing_scene.glb';   // 檔名你可改
+      link.download = 'packing_scene.gltf';   // ⭐ 副檔名用 .gltf
       link.click();
-
       URL.revokeObjectURL(url);
-      uiToast('已匯出 GLB：packing_scene.glb');
+
+      if (typeof uiToast === 'function') {
+        uiToast('已匯出 glTF：packing_scene.gltf');
+      }
     },
-    {
-      binary: true,          // ⭐ 關鍵：true = .glb
-      onlyVisible: true,
-      truncateDrawRange: true,
-      embedImages: true
-    }
+    { binary: false }   // ⭐ 一定要 false，才會回傳 JS 物件
   );
 }
 
-// 也順便掛到 window，方便你從 console 手動呼叫
-window.exportPackingToGLB = exportPackingToGLB;
+window.exportPackingToGLTF = exportPackingToGLTF;
+
 
 function ensureSceneButtons() {
-  const ui = document.getElementById('ui'); if (!ui) return;
+  const ui = document.getElementById('ui');
+  if (!ui) return;
+
+  // 刪除選取
   if (!document.getElementById('deleteSelectedBtn')) {
-    const b1 = document.createElement('button'); 
-    b1.id='deleteSelectedBtn'; 
-    b1.textContent='刪除選取'; 
-    b1.style.marginLeft='8px'; 
+    const b1 = document.createElement('button');
+    b1.id = 'deleteSelectedBtn';
+    b1.textContent = '刪除選取';
+    b1.style.marginLeft = '8px';
     ui.appendChild(b1);
     b1.addEventListener('click', deleteSelected);
   }
+
+  // 清空容器
   if (!document.getElementById('clearAllBtn')) {
-    const b2 = document.createElement('button'); 
-    b2.id='clearAllBtn'; 
-    b2.textContent='清空容器'; 
-    b2.style.marginLeft='8px'; 
+    const b2 = document.createElement('button');
+    b2.id = 'clearAllBtn';
+    b2.textContent = '清空容器';
+    b2.style.marginLeft = '8px';
     ui.appendChild(b2);
     b2.addEventListener('click', clearAllObjects);
   }
+
+  // 估算空隙
   if (!document.getElementById('voidBtn')) {
-    const b3=document.createElement('button'); 
-    b3.id='voidBtn'; 
-    b3.textContent='估算空隙'; 
-    b3.style.marginLeft='8px'; 
+    const b3 = document.createElement('button');
+    b3.id = 'voidBtn';
+    b3.textContent = '估算空隙';
+    b3.style.marginLeft = '8px';
     ui.appendChild(b3);
     b3.addEventListener('click', showVoidStats);
   }
-  // ⭐ 新增：匯出 GLB 按鈕
+
+  // ⭐ 新增：匯出 GLB
   if (!document.getElementById('exportGLBBtn')) {
-    const b4 = document.createElement('button');
-    b4.id = 'exportGLBBtn';
-    b4.textContent = '匯出 GLB';
-    b4.style.marginLeft = '8px';
-    ui.appendChild(b4);
-    b4.addEventListener('click', exportPackingToGLB);
-  }
+  const b4 = document.createElement('button');
+  b4.id = 'exportGLBBtn';
+  b4.textContent = '匯出 glTF';
+  b4.style.marginLeft = '8px';
+  ui.appendChild(b4);
+  b4.addEventListener('click', exportPackingToGLTF);
 }
+
+}
+
 addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected(); });
 
 function buildTetrominoMesh(kind, unit, material) {
