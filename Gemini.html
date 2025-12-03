@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>全自動倉儲模擬 - 最終完整版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #f0f0f0; }
+        canvas { display: block; }
+        
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 200;
+        }
+
+        #status-bar {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: #00ff00;
+            padding: 15px 25px;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Microsoft JhengHei', monospace;
+            font-size: 16px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 200;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            border-left: 5px solid #00ff00;
+        }
+
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 5px;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+            transition: transform 0.1s, opacity 0.3s;
+            color: white;
+            font-family: 'Microsoft JhengHei', sans-serif;
+        }
+
+        button:active { transform: translateY(2px); }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        #btn-process { background-color: #007bff; } 
+        #btn-process:hover { background-color: #0056b3; }
+        #btn-process.active { background-color: #28a745; } 
+
+        #btn-refill { background-color: #dc3545; } 
+        #btn-refill:hover { background-color: #bd2130; }
+    </style>
+</head>
+<body>
+    <div id="status-bar">系統待命中...</div>
+    
+    <div id="ui-container">
+        <button id="btn-process">▶ 啟動自動循環</button>
+        <button id="btn-refill">＋ 補滿紅色暫存區</button>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://esm.sh/three@0.160.0",
+                "three/addons/": "https://esm.sh/three@0.160.0/examples/jsm/",
+                "@tweenjs/tween.js": "https://esm.sh/@tweenjs/tween.js@23.1.1"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import TWEEN from '@tweenjs/tween.js';
+
+        // --- 全域變數 ---
+        let scene, camera, renderer, controls;
+        let forklift, forks, liftGroup; 
+        let currentBlueGroup; 
+        let emptyPalletStack = []; 
+        let cargoInRed = []; 
+        
+        let isAutoLoop = false; 
+        let isProcessing = false; 
+        let finishedBatchCount = 0; 
+
+        // --- 參數 ---
+        const BLUE_SIZE = 110;
+        const RED_SIZE = 220;
+        const GRID_DIM = 4; 
+        const ITEM_SIZE = (BLUE_SIZE / GRID_DIM) - 2;
+
+        // --- 材質 (亮色系調整) ---
+        const matWood = new THREE.MeshStandardMaterial({ color: 0x8B5A2B, roughness: 0.9 });
+        const matConcrete = new THREE.MeshStandardMaterial({ color: 0xDDDDDD, roughness: 0.5 }); // 地板更亮
+        const matWall = new THREE.MeshStandardMaterial({ color: 0xEEEEEE, roughness: 0.8 }); // 牆壁更白
+        const matBlueContainer = new THREE.MeshStandardMaterial({ color: 0x00FFFF, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
+        const matRedContainer = new THREE.MeshStandardMaterial({ color: 0xFF0000, transparent: true, opacity: 0.2, side: THREE.DoubleSide });
+        const matForkliftBody = new THREE.MeshStandardMaterial({ color: 0xFFA500, metalness: 0.3, roughness: 0.5 });
+        const matDarkMetal = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.6, roughness: 0.4 });
+        const matSteel = new THREE.MeshStandardMaterial({ color: 0x888899, metalness: 0.8, roughness: 0.2 });
+        const matTire = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9 });
+        
+        // 機器設備材質
+        const matMachineBody = new THREE.MeshStandardMaterial({ color: 0x607D8B, roughness: 0.4 });
+        const matMachineDetail = new THREE.MeshStandardMaterial({ color: 0xFFC107, roughness: 0.6 });
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xf0f0f0); // 明亮背景
+            scene.fog = new THREE.Fog(0xf0f0f0, 800, 3000);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 5000);
+            camera.position.set(350, 500, 850);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            // --- 燈光升級 (更明亮) ---
+            const ambient = new THREE.AmbientLight(0xffffff, 0.85); // 基礎亮度提高
+            scene.add(ambient);
+            
+            // 半球光 (模擬天空與地面反光，增加立體感)
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            hemiLight.position.set(0, 500, 0);
+            scene.add(hemiLight);
+
+            // 主光源
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            dirLight.position.set(300, 800, 500);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.set(2048, 2048);
+            dirLight.shadow.bias = -0.0005;
+            scene.add(dirLight);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 0, 0);
+            controls.enableDamping = true;
+
+            document.getElementById('btn-process').addEventListener('click', toggleAutoLoop);
+            document.getElementById('btn-refill').addEventListener('click', refillRedContainer);
+
+            createEnvironment();
+            createBackgroundMachinery(); // 新增背景機器
+            createInitialContainers();
+            createPalletStack();
+            createRealisticForklift(); // 內含駕駛員
+            refillRedContainer(); 
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function updateStatus(text) {
+            document.getElementById('status-bar').innerText = text;
+        }
+
+        function toggleAutoLoop() {
+            const btn = document.getElementById('btn-process');
+            if (!isAutoLoop) {
+                isAutoLoop = true;
+                btn.innerText = "■ 停止自動循環";
+                btn.classList.add('active');
+                if (!isProcessing) startPackingProcess(); 
+            } else {
+                isAutoLoop = false;
+                btn.innerText = "▶ 啟動自動循環";
+                btn.classList.remove('active');
+                updateStatus("正在等待當前流程結束...");
+            }
+        }
+
+        // --- 場景物件 ---
+        function createEnvironment() {
+            const floor = new THREE.Mesh(new THREE.PlaneGeometry(5000, 5000), matConcrete);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            const backWall = new THREE.Mesh(new THREE.BoxGeometry(4000, 800, 20), matWall);
+            backWall.position.set(0, 400, -600);
+            backWall.receiveShadow = true;
+            scene.add(backWall);
+
+            const door = new THREE.Mesh(new THREE.PlaneGeometry(300, 400), new THREE.MeshStandardMaterial({color:0x8899AA, roughness:0.4, metalness:0.3}));
+            door.position.set(600, 200, -588);
+            scene.add(door);
+            
+            // 更多窗戶，增加光亮感
+            [-800, -400, 0, 400].forEach(x => {
+                const glass = new THREE.Mesh(new THREE.PlaneGeometry(180, 120), new THREE.MeshStandardMaterial({color:0xcceeff, transparent:true, opacity:0.6}));
+                glass.position.set(x, 500, -588);
+                scene.add(glass);
+                // 窗框
+                const frame = new THREE.Mesh(new THREE.BoxGeometry(190, 130, 5), matDarkMetal);
+                frame.position.set(x, 500, -590);
+                scene.add(frame);
+            });
+        }
+
+        // --- 新增：背景機器 ---
+        function createBackgroundMachinery() {
+            // 1. 大型儲存槽 (Silos)
+            const siloGroup = new THREE.Group();
+            const siloGeo = new THREE.CylinderGeometry(40, 40, 250, 32);
+            const silo1 = new THREE.Mesh(siloGeo, matMachineBody); silo1.position.set(0, 125, 0);
+            const silo2 = new THREE.Mesh(siloGeo, matMachineBody); silo2.position.set(90, 125, 0);
+            
+            // 頂蓋
+            const domeGeo = new THREE.SphereGeometry(40, 32, 16, 0, Math.PI*2, 0, Math.PI/2);
+            const dome1 = new THREE.Mesh(domeGeo, matMachineBody); dome1.position.set(0, 250, 0);
+            const dome2 = new THREE.Mesh(domeGeo, matMachineBody); dome2.position.set(90, 250, 0);
+
+            siloGroup.add(silo1, silo2, dome1, dome2);
+            // 管線
+            const pipeGeo = new THREE.CylinderGeometry(5, 5, 90);
+            const pipe = new THREE.Mesh(pipeGeo, matMachineDetail);
+            pipe.rotation.z = Math.PI/2;
+            pipe.position.set(45, 200, 0);
+            siloGroup.add(pipe);
+
+            siloGroup.position.set(-600, 0, -450);
+            scene.add(siloGroup);
+
+            // 2. 輸送帶系統
+            const convGroup = new THREE.Group();
+            const convBody = new THREE.Mesh(new THREE.BoxGeometry(400, 20, 60), matMachineBody);
+            convBody.position.y = 50;
+            // 腳架
+            for(let i=0; i<5; i++) {
+                const leg = new THREE.Mesh(new THREE.CylinderGeometry(3,3,50), matDarkMetal);
+                leg.position.set(-180 + i*90, 25, 0);
+                convGroup.add(leg);
+            }
+            // 滾輪
+            for(let i=0; i<20; i++) {
+                const roller = new THREE.Mesh(new THREE.CylinderGeometry(2,2,55), matMachineDetail);
+                roller.rotation.x = Math.PI/2;
+                roller.position.set(-180 + i*19, 62, 0);
+                convGroup.add(roller);
+            }
+            convGroup.add(convBody);
+            convGroup.position.set(200, 0, -450);
+            scene.add(convGroup);
+
+            // 3. 控制面板櫃
+            const panel = new THREE.Mesh(new THREE.BoxGeometry(60, 100, 40), matMachineBody);
+            panel.position.set(500, 50, -450);
+            scene.add(panel);
+            // 按鈕
+            const btn1 = new THREE.Mesh(new THREE.CylinderGeometry(2,2,2), new THREE.MeshBasicMaterial({color:0xff0000}));
+            btn1.rotation.x = Math.PI/2; btn1.position.set(500, 80, -428); scene.add(btn1);
+            const btn2 = new THREE.Mesh(new THREE.CylinderGeometry(2,2,2), new THREE.MeshBasicMaterial({color:0x00ff00}));
+            btn2.rotation.x = Math.PI/2; btn2.position.set(510, 80, -428); scene.add(btn2);
+        }
+
+        function createPallet(width, depth) {
+            const group = new THREE.Group();
+            const plankH = 2; const runnerH = 10;
+            const topGeo = new THREE.BoxGeometry(width, plankH, depth/7*0.9);
+            for(let i=0; i<7; i++){
+                const b = new THREE.Mesh(topGeo, matWood);
+                b.position.set(0, runnerH + plankH/2, (i/6-0.5)*(depth-depth/7*0.9));
+                b.castShadow=true; b.receiveShadow=true; group.add(b);
+            }
+            const runnerGeo = new THREE.BoxGeometry(width*0.12, runnerH, depth);
+            for(let i=0; i<3; i++){
+                const l = new THREE.Mesh(runnerGeo, matWood);
+                l.position.set((i/2-0.5)*(width*0.9), runnerH/2, 0);
+                l.castShadow=true; l.receiveShadow=true; group.add(l);
+            }
+            return group;
+        }
+
+        function createInitialContainers() {
+            createNewBlueContainerGroup();
+            const redGroup = new THREE.Group();
+            scene.add(redGroup);
+            redGroup.position.set(250, 0, 0);
+            redGroup.add(createPallet(RED_SIZE, RED_SIZE));
+            const redBox = new THREE.Mesh(new THREE.BoxGeometry(RED_SIZE, RED_SIZE, RED_SIZE), matRedContainer);
+            redBox.position.set(0, 12 + RED_SIZE/2, 0); 
+            redBox.add(new THREE.LineSegments(new THREE.EdgesGeometry(redBox.geometry), new THREE.LineBasicMaterial({color:0xff0000, transparent:true, opacity:0.5})));
+            redGroup.add(redBox);
+        }
+
+        function createNewBlueContainerGroup() {
+            currentBlueGroup = new THREE.Group();
+            scene.add(currentBlueGroup);
+            currentBlueGroup.position.set(0, 0, 0); 
+            currentBlueGroup.add(createPallet(BLUE_SIZE, BLUE_SIZE));
+            const blueBox = new THREE.Mesh(new THREE.BoxGeometry(BLUE_SIZE, BLUE_SIZE, BLUE_SIZE), matBlueContainer);
+            blueBox.position.set(0, 12 + BLUE_SIZE/2, 0);
+            blueBox.add(new THREE.LineSegments(new THREE.EdgesGeometry(blueBox.geometry), new THREE.LineBasicMaterial({color:0x00ffff, transparent:true, opacity:0.5})));
+            currentBlueGroup.add(blueBox);
+        }
+
+        function createPalletStack() {
+            for(let i=0; i<12; i++){
+                addPalletToStack(i);
+            }
+        }
+
+        function addPalletToStack(index) {
+            const p = createPallet(BLUE_SIZE, BLUE_SIZE);
+            p.position.set(0, index*14, -250); 
+            p.rotation.y = (Math.random()-0.5)*0.1;
+            scene.add(p);
+            emptyPalletStack.push(p);
+        }
+
+        function createRealisticForklift() {
+            forklift = new THREE.Group();
+            // 底盤
+            const chassis = new THREE.Mesh(new THREE.BoxGeometry(35, 15, 60), matForkliftBody);
+            chassis.position.y = 12; chassis.castShadow = true; forklift.add(chassis);
+            const cw = new THREE.Mesh(new THREE.CylinderGeometry(18, 18, 35, 32, 1, false, 0, Math.PI), matForkliftBody);
+            cw.rotation.set(Math.PI/2, Math.PI/2, 0); cw.position.set(0, 12, -30); forklift.add(cw);
+            
+            // 駕駛座框架
+            const postFL = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,45), matDarkMetal); postFL.position.set(14, 40, 10); forklift.add(postFL);
+            const postFR = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,45), matDarkMetal); postFR.position.set(-14, 40, 10); forklift.add(postFR);
+            const postBL = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,45), matDarkMetal); postBL.position.set(14, 40, -15); forklift.add(postBL);
+            const postBR = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,45), matDarkMetal); postBR.position.set(-14, 40, -15); forklift.add(postBR);
+            const roof = new THREE.Mesh(new THREE.BoxGeometry(32, 2, 30), matDarkMetal); roof.position.set(0, 63, -2); forklift.add(roof);
+
+            // --- 新增：駕駛員 (Driver) ---
+            const driverGroup = new THREE.Group();
+            
+            // 身體
+            const bodyGeo = new THREE.BoxGeometry(14, 20, 10);
+            const bodyMat = new THREE.MeshStandardMaterial({color: 0x0055AA}); // 藍色制服
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.set(0, 30, -5);
+            driverGroup.add(body);
+
+            // 頭部
+            const headGeo = new THREE.SphereGeometry(5, 16, 16);
+            const headMat = new THREE.MeshStandardMaterial({color: 0xFFCCAA}); // 膚色
+            const head = new THREE.Mesh(headGeo, headMat);
+            head.position.set(0, 42, -5);
+            driverGroup.add(head);
+
+            // 安全帽
+            const helmetGeo = new THREE.SphereGeometry(5.5, 16, 16, 0, Math.PI*2, 0, Math.PI/2);
+            const helmetMat = new THREE.MeshStandardMaterial({color: 0xFFFF00}); // 黃色
+            const helmet = new THREE.Mesh(helmetGeo, helmetMat);
+            helmet.position.set(0, 42, -5);
+            driverGroup.add(helmet);
+
+            // 手 (握方向盤)
+            const armGeo = new THREE.CylinderGeometry(2, 2, 12);
+            const armL = new THREE.Mesh(armGeo, bodyMat);
+            armL.rotation.z = -Math.PI/4; armL.rotation.x = -Math.PI/3;
+            armL.position.set(8, 32, 2);
+            driverGroup.add(armL);
+            
+            const armR = new THREE.Mesh(armGeo, bodyMat);
+            armR.rotation.z = Math.PI/4; armR.rotation.x = -Math.PI/3;
+            armR.position.set(-8, 32, 2);
+            driverGroup.add(armR);
+
+            // 腿
+            const legGeo = new THREE.BoxGeometry(5, 15, 5);
+            const legMat = new THREE.MeshStandardMaterial({color: 0x222222}); // 黑色褲子
+            const legL = new THREE.Mesh(legGeo, legMat);
+            legL.position.set(4, 22, 5); legL.rotation.x = -Math.PI/2;
+            driverGroup.add(legL);
+            const legR = new THREE.Mesh(legGeo, legMat);
+            legR.position.set(-4, 22, 5); legR.rotation.x = -Math.PI/2;
+            driverGroup.add(legR);
+
+            forklift.add(driverGroup);
+
+            // 方向盤
+            const steeringWheel = new THREE.Mesh(new THREE.TorusGeometry(3, 0.5, 8, 16), matDarkMetal);
+            steeringWheel.rotation.x = Math.PI/3;
+            steeringWheel.position.set(0, 32, 8);
+            forklift.add(steeringWheel);
+
+            // 輪子
+            const wGeo = new THREE.CylinderGeometry(9, 9, 8, 24); wGeo.rotateZ(Math.PI/2);
+            const wGeoS = new THREE.CylinderGeometry(6, 6, 6, 24); wGeoS.rotateZ(Math.PI/2);
+            const fw1 = new THREE.Mesh(wGeo, matTire); fw1.position.set(18, 9, 20); forklift.add(fw1);
+            const fw2 = new THREE.Mesh(wGeo, matTire); fw2.position.set(-18, 9, 20); forklift.add(fw2);
+            const rw1 = new THREE.Mesh(wGeoS, matTire); rw1.position.set(16, 6, -20); forklift.add(rw1);
+            const rw2 = new THREE.Mesh(wGeoS, matTire); rw2.position.set(-16, 6, -20); forklift.add(rw2);
+
+            // 門架
+            const mastL = new THREE.Mesh(new THREE.BoxGeometry(2, 70, 4), matDarkMetal); mastL.position.set(10, 35, 32); forklift.add(mastL);
+            const mastR = new THREE.Mesh(new THREE.BoxGeometry(2, 70, 4), matDarkMetal); mastR.position.set(-10, 35, 32); forklift.add(mastR);
+
+            // 升降組
+            liftGroup = new THREE.Group();
+            const carriage = new THREE.Mesh(new THREE.BoxGeometry(20, 15, 2), matSteel); carriage.position.set(0, 5, 0); liftGroup.add(carriage);
+            const fGeo = new THREE.BoxGeometry(3, 1, 40);
+            const fL = new THREE.Mesh(fGeo, matSteel); fL.position.set(6, 0, 20); liftGroup.add(fL);
+            const fR = new THREE.Mesh(fGeo, matSteel); fR.position.set(-6, 0, 20); liftGroup.add(fR);
+            liftGroup.position.set(0, 5, 34);
+            forklift.add(liftGroup);
+            forks = liftGroup;
+
+            forklift.position.set(150, 0, 150);
+            forklift.rotation.y = -Math.PI/2;
+            scene.add(forklift);
+        }
+
+        function getRandomColor() { return [0xFF6B6B, 0x4ECDC4, 0xFFD93D, 0xFF9F1C, 0xAB83A1, 0x2E86AB][Math.floor(Math.random()*6)]; }
+
+        function refillRedContainer() {
+            if (cargoInRed.length > 500) return;
+            updateStatus("狀態: 補充原料中...");
+            for(let i=0; i<100; i++) {
+                let geo; const r = Math.random();
+                if(r>0.7) geo = new THREE.BoxGeometry(ITEM_SIZE, ITEM_SIZE*0.8, ITEM_SIZE);
+                else if(r>0.4) geo = new THREE.BoxGeometry(ITEM_SIZE*0.9, ITEM_SIZE, ITEM_SIZE*0.9);
+                else geo = new THREE.CylinderGeometry(ITEM_SIZE/2, ITEM_SIZE/2, ITEM_SIZE, 16);
+                const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({color: getRandomColor(), roughness:0.7}));
+                mesh.castShadow = true; mesh.receiveShadow = true;
+                mesh.position.set(250 + (Math.random()-0.5)*180, 150 + Math.random()*100, (Math.random()-0.5)*180);
+                mesh.rotation.set(Math.random()*3, Math.random()*3, Math.random()*3);
+                scene.add(mesh);
+                cargoInRed.push(mesh);
+                new TWEEN.Tween(mesh.position).to({y: 15 + Math.random() * 140}, 800 + Math.random()*500).easing(TWEEN.Easing.Bounce.Out).start();
+            }
+            setTimeout(() => { if(!isProcessing) updateStatus("狀態: 系統待命中 (原料充足)"); }, 1500);
+        }
+
+        // --- 核心流程 ---
+        function startPackingProcess() {
+            if (isProcessing) return;
+            if (cargoInRed.length < 64) {
+                updateStatus("警告：原料不足！暫停作業");
+                isAutoLoop = false;
+                document.getElementById('btn-process').innerText = "▶ 啟動自動循環";
+                document.getElementById('btn-process').classList.remove('active');
+                return;
+            }
+
+            isProcessing = true;
+            updateStatus("狀態: 裝箱作業進行中...");
+
+            const packingList = [];
+            for(let i=0; i<64; i++) {
+                if(cargoInRed.length > 0) packingList.push(cargoInRed.pop());
+            }
+
+            let completed = 0;
+            packingList.forEach((mesh, idx) => {
+                const gx = idx % GRID_DIM;
+                const gy = Math.floor((idx / GRID_DIM) % GRID_DIM);
+                const gz = Math.floor(idx / (GRID_DIM*GRID_DIM));
+                
+                const tx = (gx - (GRID_DIM-1)/2) * (ITEM_SIZE + 2);
+                const ty = (gy - (GRID_DIM-1)/2) * (ITEM_SIZE + 2) + 67;
+                const tz = (gz - (GRID_DIM-1)/2) * (ITEM_SIZE + 2);
+
+                new TWEEN.Tween(mesh.position).to({y: 200}, 500).delay(idx*20).start();
+                new TWEEN.Tween(mesh.position).to({x: tx, y: ty, z: tz}, 1000).easing(TWEEN.Easing.Cubic.Out).delay(idx*20 + 500)
+                    .onComplete(() => {
+                        new TWEEN.Tween(mesh.rotation).to({x:0, y:0, z:0}, 200).start();
+                        currentBlueGroup.attach(mesh); 
+                        mesh.position.set(tx, ty, tz); 
+                        mesh.rotation.set(0, 0, 0);
+                        completed++;
+                        if(completed === packingList.length) {
+                            setTimeout(runForkliftSequence, 500);
+                        }
+                    }).start();
+            });
+        }
+
+        // --- 堆高機 Async 動作系統 ---
+        function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+        function tweenMove(target, duration) {
+            return new Promise(resolve => {
+                new TWEEN.Tween(forklift.position).to(target, duration).easing(TWEEN.Easing.Quadratic.InOut).onComplete(resolve).start();
+            });
+        }
+        function tweenRotate(yRad, duration) {
+            return new Promise(resolve => {
+                new TWEEN.Tween(forklift.rotation).to({y: yRad}, duration).onComplete(resolve).start();
+            });
+        }
+        function tweenLift(yHeight, duration) {
+            return new Promise(resolve => {
+                new TWEEN.Tween(forks.position).to({y: yHeight}, duration).easing(TWEEN.Easing.Cubic.Out).onComplete(resolve).start();
+            });
+        }
+
+        async function runForkliftSequence() {
+            try {
+                updateStatus("狀態: 1. 前往滿載容器...");
+                const dropZ = 70 - (finishedBatchCount * 130); 
+                const P_READY = {x: 0, z: 70}; 
+                const P_DROP = {x: -350, z: dropZ}; 
+                const P_STACK = {x: 0, z: -170}; 
+                const P_HOME = {x: 150, z: 150}; 
+
+                await tweenRotate(Math.PI, 500); 
+                await tweenMove(P_READY, 1500);
+                await tweenLift(15, 500);
+                forklift.attach(currentBlueGroup);
+                
+                updateStatus("狀態: 2. 搬運至成品區...");
+                await tweenMove(P_DROP, 2000);
+                await tweenLift(5, 500);
+                scene.attach(currentBlueGroup); 
+                currentBlueGroup.position.set(P_DROP.x, 0, P_DROP.z);
+                currentBlueGroup.rotation.set(0, 0, 0);
+                finishedBatchCount++; 
+
+                updateStatus("狀態: 3. 前往後方補給新棧板...");
+                await tweenMove({x: P_DROP.x + 50, z: P_DROP.z + 50}, 1000); 
+                await tweenRotate(0, 800); 
+                await tweenMove(P_STACK, 1500); 
+
+                if(emptyPalletStack.length < 3) {
+                    for(let i=0; i<5; i++) addPalletToStack(emptyPalletStack.length+i);
+                }
+                const pallet = emptyPalletStack.pop();
+                const stackH = 14 * emptyPalletStack.length;
+
+                await tweenLift(stackH + 12, 500);
+                await tweenMove({x: 0, z: P_STACK.z - 40}, 600); 
+                forklift.attach(pallet);
+                await tweenLift(stackH + 30, 400); 
+
+                updateStatus("狀態: 4. 運回空棧板...");
+                await tweenMove({x: 0, z: 50}, 1500); 
+                await tweenRotate(Math.PI, 1000); 
+                await tweenLift(10, 600); 
+                await tweenMove({x: 0, z: 70}, 1000); 
+
+                await tweenLift(5, 400);
+                scene.attach(pallet);
+                pallet.position.set(0, 0, 0); 
+                pallet.rotation.set(0, 0, 0);
+                
+                currentBlueGroup = new THREE.Group();
+                currentBlueGroup.position.set(0,0,0);
+                scene.add(currentBlueGroup);
+                currentBlueGroup.attach(pallet);
+                const blueBox = new THREE.Mesh(new THREE.BoxGeometry(BLUE_SIZE, BLUE_SIZE, BLUE_SIZE), matBlueContainer);
+                blueBox.position.set(0, 12 + BLUE_SIZE/2, 0);
+                blueBox.add(new THREE.LineSegments(new THREE.EdgesGeometry(blueBox.geometry), new THREE.LineBasicMaterial({color:0x00ffff, transparent:true, opacity:0.5})));
+                currentBlueGroup.add(blueBox);
+
+                updateStatus("狀態: 作業完成，準備下一輪...");
+                await tweenMove({x: 0, z: 150}, 800); 
+                await tweenRotate(-Math.PI/2, 600);
+                await tweenMove(P_HOME, 1000);
+
+                isProcessing = false;
+                if (isAutoLoop) {
+                    startPackingProcess();
+                } else {
+                    updateStatus("狀態: 單次循環結束");
+                }
+            } catch (e) {
+                console.error(e);
+                isProcessing = false;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            TWEEN.update();
+            controls.update();
+            if(forklift) {
+                forklift.rotation.x = 0;
+                forklift.rotation.z = 0;
+            }
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
