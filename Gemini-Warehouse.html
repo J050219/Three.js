@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <title>全自動倉儲模擬 - 最終完整版</title>
+    <title>全自動倉儲模擬 </title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #f0f0f0; }
         canvas { display: block; }
@@ -56,6 +56,21 @@
 
         #btn-refill { background-color: #dc3545; } 
         #btn-refill:hover { background-color: #bd2130; }
+
+        #btn-record { background-color: #333; border: 1px solid #999; }
+        #btn-record:hover { background-color: #555; }
+        #btn-record.recording { 
+            background-color: #cc0000; 
+            color: white; 
+            animation: pulse 1.5s infinite; 
+            border: 1px solid #ff0000;
+        }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(204, 0, 0, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(204, 0, 0, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(204, 0, 0, 0); }
+        }
     </style>
 </head>
 <body>
@@ -64,6 +79,7 @@
     <div id="ui-container">
         <button id="btn-process">▶ 啟動自動循環</button>
         <button id="btn-refill">＋ 補滿紅色暫存區</button>
+        <button id="btn-record">● 開始錄影</button> 
     </div>
 
     <script type="importmap">
@@ -91,6 +107,11 @@
         let isAutoLoop = false; 
         let isProcessing = false; 
         let finishedBatchCount = 0; 
+
+        // --- 錄影變數 ---
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isRecording = false;
 
         // --- 參數 ---
         const BLUE_SIZE = 110;
@@ -164,6 +185,66 @@
             window.addEventListener('resize', onWindowResize);
         }
 
+        function toggleRecording() {
+            const btn = document.getElementById('btn-record');
+            if (!isRecording) {
+                startRecording();
+                btn.innerText = "■ 停止錄影";
+                btn.classList.add("recording");
+                updateStatus("錄影中... (請操作場景)");
+            } else {
+                stopRecording();
+                btn.innerText = "● 開始錄影";
+                btn.classList.remove("recording");
+                updateStatus("錄影結束，正在下載影片...");
+            }
+        }
+
+        function startRecording() {
+            recordedChunks = [];
+            const canvas = renderer.domElement;
+            const stream = canvas.captureStream(30); // 30 FPS
+            
+            let options = { mimeType: 'video/webm; codecs=vp9' };
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                options = { mimeType: 'video/webm' };
+            }
+
+            try {
+                mediaRecorder = new MediaRecorder(stream, options);
+            } catch (e) {
+                console.error("MediaRecorder error:", e);
+                alert("瀏覽器不支援錄影，請使用 Chrome/Firefox");
+                return;
+            }
+
+            mediaRecorder.ondataavailable = function(event) {
+                if (event.data.size > 0) recordedChunks.push(event.data);
+            };
+
+            mediaRecorder.onstop = function() {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                document.body.appendChild(a);
+                a.style = 'display: none';
+                a.href = url;
+                a.download = 'port_simulation.webm';
+                a.click();
+                window.URL.revokeObjectURL(url);
+            };
+
+            mediaRecorder.start();
+            isRecording = true;
+        }
+
+        function stopRecording() {
+            if(mediaRecorder) {
+                mediaRecorder.stop();
+                isRecording = false;
+            }
+        }
+        
         function updateStatus(text) {
             document.getElementById('status-bar').innerText = text;
         }
