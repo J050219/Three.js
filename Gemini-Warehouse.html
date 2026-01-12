@@ -101,6 +101,15 @@
         let recordedChunks = [];
         let isRecording = false;
 
+        // --- [新增] 成品區排列參數 ---
+        const STORAGE_ROWS = 5;       // 設定擺幾排
+        const STORAGE_COLS = 5;       // 設定擺幾列
+        const STORAGE_GAP = 140;      // 每個棧板的間距
+        const STORAGE_START_X = -900; // 第一個成品的 X 座標 (放在左側空地)
+        const STORAGE_START_Z = -300; // 第一個成品的 Z 座標
+        
+        let finishedCargoList = [];   // 記錄已擺放的成品
+
         // --- 參數 ---
         const BLUE_SIZE = 110;
         const RED_SIZE = 220;
@@ -689,52 +698,153 @@
             });
         }
 
-        // [修復] 完整的堆高機動畫邏輯
         async function runForkliftSequence() {
             try {
-                updateStatus("狀態: 1. 前往滿載容器...");
-                const dropZ = 70 - (finishedBatchCount * 130); 
-                const P_READY = {x: 0, z: 100}; const P_DROP = {x: -350, z: dropZ}; 
-                const P_STACK = {x: 0, z: -170}; const P_HOME = {x: 150, z: 150}; 
-
-                await tweenRotate(Math.PI, 500); await tweenMove(P_READY, 1500); await tweenLift(15, 500);
-                forklift.attach(currentBlueGroup); currentBlueGroup.position.set(0, 5, 85); currentBlueGroup.rotation.set(0, 0, 0);
+                // 1. 計算目前的擺放位置 (矩陣演算法)
+                // finishedBatchCount 是已經完成的數量
+                const index = finishedBatchCount; 
                 
-                updateStatus("狀態: 2. 搬運至成品區...");
-                await tweenMove({x: 0, z: 120}, 800); await tweenLift(5, 500);
-                await tweenRotate(Math.PI / 2, 800); await tweenMove(P_DROP, 2000); await tweenLift(5, 500);
-                scene.attach(currentBlueGroup); currentBlueGroup.position.set(P_DROP.x, 0, P_DROP.z); currentBlueGroup.rotation.set(0, 0, 0);
+                // 如果放滿了 (超過 5x5 = 25 個)，就停止或重置 (這裡設定為停止並警示)
+                if (index >= STORAGE_ROWS * STORAGE_COLS) {
+                    updateStatus("成品區已滿！請重新整理頁面或清空");
+                    isProcessing = false;
+                    isAutoLoop = false;
+                    document.getElementById('btn-process').classList.remove('active');
+                    return;
+                }
+
+                // 計算行列： Row (X軸方向第幾排), Col (Z軸方向第幾列)
+                const colIndex = index % STORAGE_COLS; 
+                const rowIndex = Math.floor(index / STORAGE_COLS);
+
+                // 計算目標座標
+                const targetX = STORAGE_START_X + (colIndex * STORAGE_GAP); 
+                const targetZ = STORAGE_START_Z + (rowIndex * STORAGE_GAP);
+
+                updateStatus(`狀態: 搬至 ( ${rowIndex+1} ,  ${colIndex+1} )...`);
+
+                // --- 路徑點定義 ---
+                const P_HOME = {x: 150, z: 150};        // 待命點
+                const P_PICKUP = {x: 0, z: 0};          // 取貨點
+                const P_CHANNEL = {x: 0, z: targetZ};   // 通道點 (堆高機先開到對應的 Z 軸)
+                const P_DROP = {x: targetX, z: targetZ};// 最終放置點
+                const P_PALLET = {x: 0, z: -170};       // 空棧板區
+
+                // ==========================
+                // 步驟 1: 撿起剛做好的貨物
+                // ==========================
+                // 轉向並移動到取貨點前
+                await tweenRotate(Math.PI, 600); 
+                await tweenMove({x: 0, z: 100}, 1000); 
+                
+                // 抬起貨叉並插入
+                await tweenLift(15, 500);
+                
+                // 連結物件 (把藍色貨物黏在堆高機上)
+                forklift.attach(currentBlueGroup); 
+                currentBlueGroup.position.set(0, 5, 85); 
+                currentBlueGroup.rotation.set(0, 0, 0);
+                
+                // ==========================
+                // 步驟 2: 運送到計算好的位置
+                // ==========================
+                // 倒退離開包裝區
+                await tweenMove({x: 0, z: 150}, 600);
+                await tweenLift(10, 300); // 運送高度
+
+                // 移動到對應的 Z 軸通道 (這樣才不會撞到旁邊的貨)
+                // 判斷是要往前開還是往後開
+                if (targetZ > forklift.position.z) await tweenRotate(0, 600);
+                else await tweenRotate(Math.PI, 600);
+                
+                await tweenMove(P_CHANNEL, 1500);
+
+                // 轉向左側 (面向成品區 X 軸負方向)
+                await tweenRotate(-Math.PI / 2, 800); 
+
+                // 前進到放置點
+                await tweenMove(P_DROP, 2000); 
+                
+                // 放下貨物
+                await tweenLift(2, 500); 
+
+                // 解除連結 (把貨物放回場景)
+                scene.attach(currentBlueGroup); 
+                currentBlueGroup.position.set(targetX, 0, targetZ); 
+                currentBlueGroup.rotation.set(0, 0, 0);
+                
+                // 記錄這個成品，並增加計數器
+                finishedCargoList.push(currentBlueGroup);
                 finishedBatchCount++; 
 
-                updateStatus("狀態: 3. 前往後方補給新棧板...");
-                await tweenMove({x: P_DROP.x + 50, z: P_DROP.z}, 1000); await tweenRotate(Math.PI, 1000); await tweenMove({x: 0, z: P_STACK.z + 100}, 1500); 
+                // ==========================
+                // 步驟 3: 離開並補充新棧板
+                // ==========================
+                // 倒退回主通道
+                await tweenMove(P_CHANNEL, 1500);
 
-                if(emptyPalletStack.length < 3) for(let i=0; i<5; i++) addPalletToStack(emptyPalletStack.length+i);
+                // 轉向去拿空棧板
+                updateStatus("狀態: 補充空棧板...");
+                await tweenRotate(Math.PI, 800); 
+                await tweenMove({x: 0, z: P_PALLET.z + 100}, 1500); 
+
+                // 拿取空棧板邏輯
+                if(emptyPalletStack.length < 3) {
+                    // 如果快沒了，偷補幾個，避免報錯
+                    for(let i=0; i<3; i++) addPalletToStack(emptyPalletStack.length+i);
+                }
                 const pallet = emptyPalletStack.pop();
                 
+                // 調整貨叉高度去對準棧板
                 await tweenLift(14 * emptyPalletStack.length + 12, 500);
-                await tweenMove({x: 0, z: P_STACK.z + 15}, 800); 
-                forklift.attach(pallet); pallet.position.set(0, 5, 85); pallet.rotation.set(0, 0, 0);
+                await tweenMove({x: 0, z: P_PALLET.z + 15}, 800); 
+                
+                // 拿起來
+                forklift.attach(pallet); 
+                pallet.position.set(0, 5, 85); 
+                pallet.rotation.set(0, 0, 0);
                 await tweenLift(14 * emptyPalletStack.length + 30, 400); 
 
-                updateStatus("狀態: 4. 運回空棧板...");
-                await tweenMove({x: 0, z: -50}, 1000); await tweenLift(5, 800);
-                await tweenRotate(0, 1000); await tweenMove({x: 0, z: 70}, 1500); await tweenLift(5, 400);
-                scene.attach(pallet); pallet.position.set(0, 0, 0); pallet.rotation.set(0, 0, 0);
+                // ==========================
+                // 步驟 4: 回到起點準備下一輪
+                // ==========================
+                // 運回包裝區原點
+                await tweenMove({x: 0, z: -50}, 1000); 
+                await tweenLift(5, 800);
+                await tweenRotate(0, 1000); 
                 
-                currentBlueGroup = new THREE.Group(); scene.add(currentBlueGroup); currentBlueGroup.attach(pallet);
+                // 放下新棧板
+                await tweenMove({x: 0, z: 70}, 1500); 
+                await tweenLift(5, 400);
+                
+                scene.attach(pallet); 
+                pallet.position.set(0, 0, 0); 
+                pallet.rotation.set(0, 0, 0);
+                
+                // 產生新的藍色容器框線
+                currentBlueGroup = new THREE.Group(); 
+                scene.add(currentBlueGroup); 
+                currentBlueGroup.attach(pallet);
                 const blueBox = new THREE.Mesh(new THREE.BoxGeometry(BLUE_SIZE, BLUE_SIZE, BLUE_SIZE), matBlueContainer);
                 blueBox.position.set(0, 12 + BLUE_SIZE/2, 0);
                 blueBox.add(new THREE.LineSegments(new THREE.EdgesGeometry(blueBox.geometry), new THREE.LineBasicMaterial({color:0x00ffff, transparent:true, opacity:0.5})));
                 currentBlueGroup.add(blueBox);
 
-                updateStatus("狀態: 作業完成，準備下一輪...");
-                await tweenMove({x: 0, z: 150}, 800); await tweenRotate(-Math.PI/2, 600); await tweenMove(P_HOME, 1000);
+                // 堆高機回待命點
+                updateStatus("狀態: 準備下一輪...");
+                await tweenMove({x: 0, z: 150}, 800); 
+                await tweenRotate(-Math.PI/2, 600); 
+                await tweenMove(P_HOME, 1000);
 
-                isProcessing = false; if (isAutoLoop) startPackingProcess(); else updateStatus("狀態: 單次循環結束");
-            } catch (e) { console.error(e); isProcessing = false; }
+                // 流程結束，檢查是否自動循環
+                isProcessing = false; 
+                if (isAutoLoop) startPackingProcess(); 
+
+            } catch (e) { 
+                console.error("堆高機流程錯誤:", e); 
+                isProcessing = false; 
+            }
         }
-
         function onWindowResize() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
