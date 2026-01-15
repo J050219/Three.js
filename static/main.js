@@ -98,8 +98,8 @@ function createSmartDiffusion(renderer){
 
 // 亮色/暗色主題倉庫背景
 function createWarehouseBackground(scene, renderer, opts = {}) {
-  const W = opts.width  ?? 1400;
-  const D = opts.depth  ?? 1000;
+  const W = opts.width  ?? 15000;
+  const D = opts.depth  ?? 15000;
   const H = opts.height ?? 420;
   const baseY = Number.isFinite(opts.baseY) ? opts.baseY : 0;
 
@@ -109,12 +109,12 @@ function createWarehouseBackground(scene, renderer, opts = {}) {
 
   // 修正：使用 opts.theme 判斷
   const palette = (opts.theme === 'light') ? {
-    fog:        0xf5f7fb,
-    floorTint:  0xdfe6ee,
+    fog:        0xdbe9f4, // Gemini 的霧氣顏色
+    floorTint:  0x444444, // Gemini 的地板顏色 (深灰)
     wallTint:   0xf2f4f7,
-    beam:       0xb9c3cf,
+    beam:       0x3b4048,
     hemiSky:    0xffffff,
-    hemiGround: 0xdfe6ee,
+    hemiGround: 0x444444,
     spot:       0xffffff,
     gridAlpha:  0.10
   } : {
@@ -132,8 +132,15 @@ function createWarehouseBackground(scene, renderer, opts = {}) {
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
   // 霧＆背景
-  scene.fog = new THREE.Fog(new THREE.Color(palette.fog), H*0.9, H*2.6);
-  scene.background = new THREE.Color(palette.fog);
+  /* scene.fog = new THREE.Fog(new THREE.Color(palette.fog), H*0.9, H*3.5);
+  scene.background = new THREE.Color(palette.fog); */
+  /* scene.background = null; */
+
+  const blackColor = 0x000000;
+  
+  scene.background = new THREE.Color(blackColor);
+  
+  scene.fog = new THREE.Fog(blackColor, 2000, 8000);
 
   // 程式化水泥材質（淺色底）
   function makeConcreteTex(scale=1024, spots=240){
@@ -509,9 +516,10 @@ const ConvergenceChart = {
 
 //場景初始化
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 30000);
 
-const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', alpha: false });
+renderer.setClearColor( 0x000000, 1 );
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
@@ -556,9 +564,14 @@ scene.add(pallet);
     colsX: 0,
     colsZ: 0,
     useTopBeam: false,
-    theme: 'light' // ← 亮色系
+    /* theme: 'light' */ // ← 亮色系
   });
-  _bg = createSmartDiffusion(renderer);
+  /* _bg = createSmartDiffusion(renderer); */
+  // 1. 放置輸送帶 (放在托盤後方遠處)
+  createConveyorBelt(scene, 500, palletBottomY, 0);
+
+  // 2. 放置堆高機 (放在托盤左側，稍微轉向)
+  createForklift(scene, -200, palletBottomY, 50);
 }
 
 /* ------- 藍色容器（置中於托盤上） ------- */
@@ -2315,6 +2328,104 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
     lastMouseY = event.clientY;
   }
 });
+
+/* =========================================
+   新增：輸送帶與堆高機 (來自 Gemini-Warehouse)
+   ========================================= */
+
+// 1. 建立輸送帶
+function createConveyorBelt(scene, x, y, z) {
+    const group = new THREE.Group();
+    group.position.set(x, y, z);
+
+    group.rotation.y = -Math.PI / 2;
+
+    // 材質
+    const matRail = new THREE.MeshPhongMaterial({ color: 0x555555 }); // 深灰支架
+    const matRoller = new THREE.MeshPhongMaterial({ color: 0xcccccc }); // 銀色滾輪
+
+    // 輸送帶參數
+    const width = 60;
+    const length = 400; // 輸送帶長度
+    const height = 15;  // 架高
+    const rollerRadius = 3;
+    const rollerCount = 30;
+
+    // 左支架
+    const railL = new THREE.Mesh(new THREE.BoxGeometry(5, 5, length), matRail);
+    railL.position.set(-(width/2 + 2.5), height, 0);
+    group.add(railL);
+
+    // 右支架
+    const railR = new THREE.Mesh(new THREE.BoxGeometry(5, 5, length), matRail);
+    railR.position.set((width/2 + 2.5), height, 0);
+    group.add(railR);
+
+    // 滾輪 (用迴圈產生)
+    for(let i = 0; i <= rollerCount; i++) {
+        const roller = new THREE.Mesh(new THREE.CylinderGeometry(rollerRadius, rollerRadius, width, 16), matRoller);
+        roller.rotation.z = Math.PI / 2;
+        // 分佈在長度上
+        const zPos = -length/2 + (length/rollerCount) * i;
+        roller.position.set(0, height, zPos);
+        group.add(roller);
+    }
+
+    // 支腳 (簡單兩對)
+    const legGeo = new THREE.BoxGeometry(5, height, 5);
+    const leg1 = new THREE.Mesh(legGeo, matRail); leg1.position.set(-width/2-2.5, height/2, -length/2+10); group.add(leg1);
+    const leg2 = new THREE.Mesh(legGeo, matRail); leg2.position.set( width/2+2.5, height/2, -length/2+10); group.add(leg2);
+    const leg3 = new THREE.Mesh(legGeo, matRail); leg3.position.set(-width/2-2.5, height/2,  length/2-10); group.add(leg3);
+    const leg4 = new THREE.Mesh(legGeo, matRail); leg4.position.set( width/2+2.5, height/2,  length/2-10); group.add(leg4);
+
+    scene.add(group);
+    return group;
+}
+
+// 2. 建立堆高機
+function createForklift(scene, x, y, z) {
+    const forkliftGroup = new THREE.Group();
+    forkliftGroup.position.set(x, y, z);
+    
+    // 讓堆高機轉向面對場景中心 (可依需求調整)
+    forkliftGroup.rotation.y = -Math.PI / 2; 
+
+    // 材質
+    const matBody = new THREE.MeshPhongMaterial({ color: 0xffaa00 }); // 黃色車身
+    const matBlack = new THREE.MeshPhongMaterial({ color: 0x222222 }); // 黑色輪胎/駕駛艙
+    const matMetal = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.4, metalness: 0.8 });
+
+    // 車身 (Chassis)
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(60, 30, 100), matBody);
+    chassis.position.y = 22;
+    forkliftGroup.add(chassis);
+
+    // 駕駛艙 (Cabin)
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(50, 40, 50), matBlack);
+    cabin.position.set(0, 55, 10);
+    forkliftGroup.add(cabin);
+
+    // 輪子 (Wheels) - 簡化為4個圓柱
+    const wheelGeo = new THREE.CylinderGeometry(12, 12, 10, 24);
+    wheelGeo.rotateZ(Math.PI / 2);
+    const w1 = new THREE.Mesh(wheelGeo, matBlack); w1.position.set(-32, 12,  30); forkliftGroup.add(w1);
+    const w2 = new THREE.Mesh(wheelGeo, matBlack); w2.position.set( 32, 12,  30); forkliftGroup.add(w2);
+    const w3 = new THREE.Mesh(wheelGeo, matBlack); w3.position.set(-32, 12, -30); forkliftGroup.add(w3);
+    const w4 = new THREE.Mesh(wheelGeo, matBlack); w4.position.set( 32, 12, -30); forkliftGroup.add(w4);
+
+    // 門架 (Mast)
+    const mast = new THREE.Mesh(new THREE.BoxGeometry(40, 100, 5), matMetal);
+    mast.position.set(0, 50, -52); // 在車頭前方
+    forkliftGroup.add(mast);
+
+    // 貨叉 (Forks)
+    const forkGeo = new THREE.BoxGeometry(5, 2, 40);
+    const forkL = new THREE.Mesh(forkGeo, matMetal); forkL.position.set(-10, 5, -72); forkliftGroup.add(forkL);
+    const forkR = new THREE.Mesh(forkGeo, matMetal); forkR.position.set( 10, 5, -72); forkliftGroup.add(forkR);
+
+    scene.add(forkliftGroup);
+    return forkliftGroup;
+}
 
 function nudgeSelectedByArrow(code) {
   if (!isDragging || !selectedObj) return;
