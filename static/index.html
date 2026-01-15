@@ -53,21 +53,22 @@
       #ui {
         position: absolute;
         top: 60px;
-        left: 10px;
-        background: rgba(255, 255, 255, 0.9);
+        left: 20px;
+        width: 330px !important;
+        background: rgba(255, 255, 255, 0.3);
         padding: 12px;
         border-radius: 10px;
         font-family: sans-serif;
         z-index: 20;
-        min-width: 260px;
+        min-width: 330px;
       }
       .param-group {margin-bottom: 8px;}
       .param-group input {margin: 2px 0 ; display: block;  width: 100px;}
       #library {
         position: absolute;
-        top: 240px; left: 10px;
-        width: 320px; height: 280px;
-        background: rgba(255,255,255,.95);
+        top: 250px!important; left: 20px;
+        width: 330px !important; 
+        background: rgba(255,255,255,0.3);
         border-radius: 10px;
         padding: 10px;
         z-index: 15;
@@ -98,9 +99,11 @@
   <body>
     <!-- 🔹 新增按鈕區 -->
     <div id="optBar">
-      <button onclick="packToTheMax()">最佳化擺放</button>
-      <button onclick="stopAnnealing()">停止最佳化</button>
-
+      <button onclick="packToTheMax()" class="btn ghost">最佳化擺放</button>
+      <button onclick="stopAnnealing()" class="btn ghost">停止最佳化</button>
+      <button onclick="calculateVoid()" class="btn ghost">估算空隙</button>
+      <button onclick="exportGLB()" class="btn ghost">匯出 GLB</button>
+      <button id="btn-record" class="btn ghost">開始錄影</button>
     </div>
 
     <div id="ui">
@@ -183,6 +186,93 @@
         }
         addEventListener('load', placeLibrary);
         addEventListener('resize', placeLibrary);
+    </script>
+    <script>
+      const btnRecord = document.getElementById('btn-record');
+      let mediaRecorder;
+      let recordedChunks = [];
+      let isRecording = false;
+
+      if (btnRecord) {
+          btnRecord.addEventListener('click', toggleRecording);
+      }
+
+      function toggleRecording() {
+          if (!isRecording) {
+              startRecording();
+          } else {
+              stopRecording();
+          }
+      }
+
+      function startRecording() {
+          // 抓取 Three.js 的 Canvas
+          const canvas = document.querySelector('canvas');
+          if (!canvas) {
+              alert("找不到畫布 (Canvas)，請確認畫面已載入");
+              return;
+          }
+
+          // 建立錄影串流 (30 FPS)
+          const stream = canvas.captureStream(30);
+          
+          let options = { mimeType: 'video/webm;codecs=vp9' };
+          if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+              options = { mimeType: 'video/webm' };
+          }
+
+          try {
+              mediaRecorder = new MediaRecorder(stream, options);
+          } catch (e) {
+              alert('您的瀏覽器不支援此錄影格式');
+              return;
+          }
+
+          mediaRecorder.ondataavailable = function(event) {
+              if (event.data.size > 0) {
+                  recordedChunks.push(event.data);
+              }
+          };
+
+          mediaRecorder.onstop = function() {
+              const blob = new Blob(recordedChunks, { type: 'video/webm' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.style.display = 'none';
+              a.href = url;
+              
+              const date = new Date();
+              const timestamp = `${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}`;
+              a.download = `object-demo-${timestamp}.webm`;
+              
+              document.body.appendChild(a);
+              a.click();
+              
+              setTimeout(() => {
+                  document.body.removeChild(a);
+                  window.URL.revokeObjectURL(url);
+                  recordedChunks = [];
+              }, 100);
+          };
+
+          mediaRecorder.start();
+          isRecording = true;
+          
+          // 更新按鈕狀態
+          btnRecord.textContent = "⬛ 停止";
+          btnRecord.style.background = "#333";
+      }
+
+      function stopRecording() {
+          if(mediaRecorder && mediaRecorder.state !== 'inactive') {
+              mediaRecorder.stop();
+              isRecording = false;
+              
+              // 還原按鈕狀態
+              btnRecord.textContent = "🔴 錄影";
+              btnRecord.style.background = "#dc3545";
+          }
+      }
     </script>
   </body>
 </html>

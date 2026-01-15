@@ -131,16 +131,8 @@ function createWarehouseBackground(scene, renderer, opts = {}) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-  // 霧＆背景
-  /* scene.fog = new THREE.Fog(new THREE.Color(palette.fog), H*0.9, H*3.5);
-  scene.background = new THREE.Color(palette.fog); */
-  /* scene.background = null; */
-
-  const blackColor = 0x000000;
-  
-  scene.background = new THREE.Color(blackColor);
-  
-  scene.fog = new THREE.Fog(blackColor, 2000, 8000);
+  scene.background = new THREE.Color(0x000000);
+  scene.fog = new THREE.Fog(0x000000, 2000, 8000);
 
   // 程式化水泥材質（淺色底）
   function makeConcreteTex(scale=1024, spots=240){
@@ -1367,27 +1359,6 @@ function ensureSceneButtons() {
     ui.appendChild(b2);
     b2.addEventListener('click', clearAllObjects);
   }
-
-  // 估算空隙
-  if (!document.getElementById('voidBtn')) {
-    const b3 = document.createElement('button');
-    b3.id = 'voidBtn';
-    b3.textContent = '估算空隙';
-    b3.style.marginLeft = '8px';
-    ui.appendChild(b3);
-    b3.addEventListener('click', showVoidStats);
-  }
-
-  // ⭐ 新增：匯出 GLB
-  if (!document.getElementById('exportGLBBtn')) {
-  const b4 = document.createElement('button');
-  b4.id = 'exportGLBBtn';
-  b4.textContent = '匯出 glTF';
-  b4.style.marginLeft = '8px';
-  ui.appendChild(b4);
-  b4.addEventListener('click', exportPackingToGLTF);
-}
-
 }
 
 addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') deleteSelected(); });
@@ -2543,5 +2514,119 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
   renderLibrary();
 });
+
+// 1. 綁定「匯出 GLB」
+window.exportGLB = function() {
+    const exporter = new GLTFExporter();
+    exporter.parse(scene, function ( result ) {
+        const blob = new Blob( [ result ], { type: 'application/octet-stream' } );
+        const link = document.createElement( 'a' );
+        link.href = URL.createObjectURL( blob );
+        link.download = 'warehouse.glb';
+        link.click();
+    }, (e)=>console.error(e), { binary: true });
+};
+
+// 2. 綁定「計算空隙」
+// ✅ 修改：綁定到 window，改為手動關閉視窗
+window.calculateVoid = function() {
+    // 1. 取得按鈕並顯示 Loading
+    const btn = document.querySelector('button[onclick="calculateVoid()"]');
+    const originalText = btn ? btn.textContent : '估算空隙';
+    if(btn) btn.textContent = "計算中... (請稍候)";
+
+    // 2. 模擬運算延遲 (1.5秒)
+    setTimeout(() => {
+        const r = measureBlueVoid();
+        
+        // 格式化數字
+        const emptyPct = (r.emptyRatio * 100).toFixed(1);
+        const solidVol = Math.round(r.solidVolume / 1000);
+        const totalVol = Math.round(r.containerVolume / 1000);
+
+        // 3. 建立自製訊息視窗 (Overlay)
+        const overlay = document.createElement('div');
+        overlay.id = "voidResultOverlay";
+        Object.assign(overlay.style, {
+            position: 'fixed',
+            top: '0', left: '0', width: '100%', height: '100%',
+            background: 'rgba(0,0,0,0.4)', // 背景遮罩
+            zIndex: '9999',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backdropFilter: 'blur(3px)',
+            opacity: '0',
+            transition: 'opacity 0.3s'
+        });
+
+        // 4. 視窗內容 (Card)
+        const card = document.createElement('div');
+        Object.assign(card.style, {
+            background: 'rgba(20, 25, 35, 0.95)',
+            color: '#fff',
+            width: '320px',
+            padding: '25px',
+            borderRadius: '16px',
+            boxShadow: '0 20px 50px rgba(0,0,0,0.6)',
+            border: '1px solid rgba(255,255,255,0.15)',
+            textAlign: 'center',
+            fontFamily: 'system-ui, sans-serif',
+            transform: 'scale(0.9)',
+            transition: 'transform 0.3s'
+        });
+
+        // HTML 內容：包含右上角叉叉 & 底部按鈕
+        card.innerHTML = `
+            <div style="position:absolute; top:15px; right:15px; cursor:pointer; font-size:18px; color:#888;" onclick="closeVoidModal()">✕</div>
+            
+            <h3 style="margin:0 0 15px 0; font-size:18px; color:#4da3ff;">空間分析結果</h3>
+            
+            <div style="background:rgba(255,255,255,0.05); border-radius:8px; padding:15px; margin-bottom:20px; text-align:left; line-height:1.8;">
+                容器總容積: <b>${totalVol}k</b><br>
+                實體佔用: <b>${solidVol}k</b><br>
+                空隙率: <b style="color:#ff6b6b; font-size:1.2em">${emptyPct}%</b>
+            </div>
+
+            <button onclick="closeVoidModal()" style="
+                background: linear-gradient(90deg, #4da3ff, #2575fc);
+                border: none;
+                color: white;
+                padding: 10px 30px;
+                border-radius: 50px;
+                font-size: 14px;
+                cursor: pointer;
+                font-weight: bold;
+                box-shadow: 0 4px 15px rgba(77, 163, 255, 0.4);
+                transition: transform 0.1s;
+            " onmousedown="this.style.transform='scale(0.95)'" onmouseup="this.style.transform='scale(1)'">
+                確定
+            </button>
+        `;
+
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+
+        // 動畫進場
+        requestAnimationFrame(() => {
+            overlay.style.opacity = '1';
+            card.style.transform = 'scale(1)';
+        });
+
+        // 定義關閉函式
+        window.closeVoidModal = function() {
+            overlay.style.opacity = '0';
+            card.style.transform = 'scale(0.9)';
+            setTimeout(() => {
+                if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            }, 300);
+        };
+
+        // 還原按鈕文字
+        if(btn) btn.textContent = originalText;
+
+    }, 100); // 模擬計算延遲
+};
+
 window.packToTheMax = packToTheMax;
 window.stopAnnealing = stopAnnealing;
