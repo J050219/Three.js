@@ -254,6 +254,9 @@ function createWarehouseBackground(scene, renderer, opts = {}) {
 }
 
 //全域旗標 & 常數
+/* --- 請加在 main.js 最上面的 import 區域之後 --- */
+window.conveyorSystem = { start: new THREE.Vector3(), end: new THREE.Vector3() };
+
 let placementTimeline = [];
 let playingTimeline = false;
 
@@ -562,9 +565,9 @@ scene.add(pallet);
   // 1. 放置輸送帶 (放在托盤後方遠處)
   createConveyorBelt(scene, 500, palletBottomY, 0);
 
-  // 2. 放置堆高機 (放在托盤左側，稍微轉向)
-  createForklift(scene, -200, palletBottomY, 50);
+  // 2. 放置堆高機 (放在托盤左側，稍微轉向)createForklift(scene, -200, palletBottomY, 50);
 }
+  
 
 /* ------- 藍色容器（置中於托盤上） ------- */
 const containerGeometry = new THREE.BoxGeometry(110, 110, 110);
@@ -2111,30 +2114,57 @@ function createCube(type, width, height, depth, color, hasHole, holeWidth, holeH
     mesh = new THREE.Mesh(new THREE.BoxGeometry(width,height,depth), material);
   }
 
-  // 一律先放到紅色暫存區；禁止直接出現在藍箱
-  mesh.rotation.set(0, 0, 0);
-  mesh.position.set(0, 0, 0);
-  mesh.updateMatrixWorld(true);
+  scene.add(mesh);
+  mesh.userData.type = 'custom';
+  // A. 先偷算它在紅色區域該放哪
+  // placeInStaging 會把 mesh 加進 objects，這是導致問題的原因
+  const success = placeInStaging(mesh); 
+  const targetPos = mesh.position.clone(); // 記住這個算好的位置
 
-  if (!placeInStaging(mesh)) {
-    const b=getBoundsForArea('staging', new THREE.Vector3(1,1,1));
-    mesh.position.set(stagingPad.position.x, b.minY, stagingPad.position.z);
-    ensureInScene(mesh);
-    mesh.position.y = findRestingYForArea(mesh, 'staging', new THREE.Vector3(0.5,0.5,0.5));
-    clampIntoAreaBounds(mesh);
+  // B. [絕對關鍵] 立刻從 objects 清單中移除！
+  // 這樣系統就「看不到」它，自然不會去亂移它
+  const idx = objects.indexOf(mesh);
+  if (idx > -1) {
+      objects.splice(idx, 1);
   }
 
-  // 若誤入藍箱 AABB，立刻救回紅區
-  const cbox = new THREE.Box3().setFromObject(container);
-  const mbox = new THREE.Box3().setFromObject(mesh);
-  if (mbox.intersectsBox(cbox)) rescueToStaging(mesh);
+  // C. 設定動畫起點 (傳送帶)
+  if (window.conveyorSystem && window.conveyorSystem.start) {
+      mesh.position.copy(window.conveyorSystem.start);
+      mesh.position.x += (Math.random() - 0.5) * 5; // 微調
+      mesh.rotation.set(0, 0, 0); // 重置旋轉
+  } else {
+      mesh.position.set(0, 100, 0); // 備案
+  }
 
-  // 放定點後，做一次解穿透（保險）
-  resolvePenetrations(mesh);
+  // D. 執行動畫
+  const midPos = (window.conveyorSystem.end) ? window.conveyorSystem.end.clone() : targetPos.clone();
+  mesh.userData.isAnimating = true;
 
-  mesh.userData.type = 'custom';
-  mesh.userData.originalY = mesh.position.y;
-  renderVoidHUD();
+  // 動畫 1: 滑行
+  const t1 = new TWEEN.Tween(mesh.position)
+      .to({ x: midPos.x, y: midPos.y, z: midPos.z }, 2000)
+      .easing(TWEEN.Easing.Linear.None);
+
+  // 動畫 2: 跳入暫存區
+  const t2 = new TWEEN.Tween(mesh.position)
+      .to({ x: targetPos.x, y: targetPos.y, z: targetPos.z }, 800)
+      .easing(TWEEN.Easing.Quadratic.Out)
+      .onComplete(() => {
+          // [動畫結束]
+          mesh.userData.isAnimating = false;
+          mesh.position.copy(targetPos); // 確保位置精確
+          
+          // E. 這時候才正式加入清單！
+          objects.push(mesh);
+          
+          // 更新介面
+          if (typeof renderVoidHUD === 'function') renderVoidHUD();
+          if (typeof updateChartData === 'function') updateChartData();
+      });
+
+  t1.chain(t2);
+  t1.start();
 }
 
 //滑鼠互動（拖曳/旋轉/抬升；全程不重疊 + 邊界約束）
@@ -2303,100 +2333,214 @@ renderer.domElement.addEventListener('mousemove',(event) =>{
 /* =========================================
    新增：輸送帶與堆高機 (來自 Gemini-Warehouse)
    ========================================= */
-
-// 1. 建立輸送帶
+// 1. 建立傳送帶模型
 function createConveyorBelt(scene, x, y, z) {
     const group = new THREE.Group();
     group.position.set(x, y, z);
+    group.rotation.y = -Math.PI / 2; // 轉向指向暫存區
 
-    group.rotation.y = -Math.PI / 2;
+    // 傳送帶本體
+    const railGeo = new THREE.BoxGeometry(60, 5, 400);
+    const matRail = new THREE.MeshPhongMaterial({ color: 0x333333 });
+    const rail = new THREE.Mesh(railGeo, matRail);
+    rail.position.y = 2.5;
+    group.add(rail);
 
-    // 材質
-    const matRail = new THREE.MeshPhongMaterial({ color: 0x555555 }); // 深灰支架
-    const matRoller = new THREE.MeshPhongMaterial({ color: 0xcccccc }); // 銀色滾輪
-
-    // 輸送帶參數
-    const width = 60;
-    const length = 400; // 輸送帶長度
-    const height = 15;  // 架高
-    const rollerRadius = 3;
-    const rollerCount = 30;
-
-    // 左支架
-    const railL = new THREE.Mesh(new THREE.BoxGeometry(5, 5, length), matRail);
-    railL.position.set(-(width/2 + 2.5), height, 0);
-    group.add(railL);
-
-    // 右支架
-    const railR = new THREE.Mesh(new THREE.BoxGeometry(5, 5, length), matRail);
-    railR.position.set((width/2 + 2.5), height, 0);
-    group.add(railR);
-
-    // 滾輪 (用迴圈產生)
-    for(let i = 0; i <= rollerCount; i++) {
-        const roller = new THREE.Mesh(new THREE.CylinderGeometry(rollerRadius, rollerRadius, width, 16), matRoller);
+    // 滾輪 (視覺效果)
+    const rollerGeo = new THREE.CylinderGeometry(2, 2, 58, 16);
+    const matRoller = new THREE.MeshPhongMaterial({ color: 0x888888 });
+    for (let i = -190; i < 200; i += 20) {
+        const roller = new THREE.Mesh(rollerGeo, matRoller);
         roller.rotation.z = Math.PI / 2;
-        // 分佈在長度上
-        const zPos = -length/2 + (length/rollerCount) * i;
-        roller.position.set(0, height, zPos);
+        roller.position.set(0, 6, i);
         group.add(roller);
     }
 
-    // 支腳 (簡單兩對)
-    const legGeo = new THREE.BoxGeometry(5, height, 5);
-    const leg1 = new THREE.Mesh(legGeo, matRail); leg1.position.set(-width/2-2.5, height/2, -length/2+10); group.add(leg1);
-    const leg2 = new THREE.Mesh(legGeo, matRail); leg2.position.set( width/2+2.5, height/2, -length/2+10); group.add(leg2);
-    const leg3 = new THREE.Mesh(legGeo, matRail); leg3.position.set(-width/2-2.5, height/2,  length/2-10); group.add(leg3);
-    const leg4 = new THREE.Mesh(legGeo, matRail); leg4.position.set( width/2+2.5, height/2,  length/2-10); group.add(leg4);
-
     scene.add(group);
-    return group;
-}
-
-// 2. 建立堆高機
-function createForklift(scene, x, y, z) {
-    const forkliftGroup = new THREE.Group();
-    forkliftGroup.position.set(x, y, z);
     
-    // 讓堆高機轉向面對場景中心 (可依需求調整)
-    forkliftGroup.rotation.y = -Math.PI / 2; 
-
-    // 材質
-    const matBody = new THREE.MeshPhongMaterial({ color: 0xffaa00 }); // 黃色車身
-    const matBlack = new THREE.MeshPhongMaterial({ color: 0x222222 }); // 黑色輪胎/駕駛艙
-    const matMetal = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.4, metalness: 0.8 });
-
-    // 車身 (Chassis)
-    const chassis = new THREE.Mesh(new THREE.BoxGeometry(60, 30, 100), matBody);
-    chassis.position.y = 22;
-    forkliftGroup.add(chassis);
-
-    // 駕駛艙 (Cabin)
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(50, 40, 50), matBlack);
-    cabin.position.set(0, 55, 10);
-    forkliftGroup.add(cabin);
-
-    // 輪子 (Wheels) - 簡化為4個圓柱
-    const wheelGeo = new THREE.CylinderGeometry(12, 12, 10, 24);
-    wheelGeo.rotateZ(Math.PI / 2);
-    const w1 = new THREE.Mesh(wheelGeo, matBlack); w1.position.set(-32, 12,  30); forkliftGroup.add(w1);
-    const w2 = new THREE.Mesh(wheelGeo, matBlack); w2.position.set( 32, 12,  30); forkliftGroup.add(w2);
-    const w3 = new THREE.Mesh(wheelGeo, matBlack); w3.position.set(-32, 12, -30); forkliftGroup.add(w3);
-    const w4 = new THREE.Mesh(wheelGeo, matBlack); w4.position.set( 32, 12, -30); forkliftGroup.add(w4);
-
-    // 門架 (Mast)
-    const mast = new THREE.Mesh(new THREE.BoxGeometry(40, 100, 5), matMetal);
-    mast.position.set(0, 50, -52); // 在車頭前方
-    forkliftGroup.add(mast);
-
-    // 貨叉 (Forks)
-    const forkGeo = new THREE.BoxGeometry(5, 2, 40);
-    const forkL = new THREE.Mesh(forkGeo, matMetal); forkL.position.set(-10, 5, -72); forkliftGroup.add(forkL);
-    const forkR = new THREE.Mesh(forkGeo, matMetal); forkR.position.set( 10, 5, -72); forkliftGroup.add(forkR);
-
-    scene.add(forkliftGroup);
-    return forkliftGroup;
+    // 更新世界座標並記錄起點/終點
+    group.updateMatrixWorld(true);
+    
+    // 起點 (遠端)
+    const startLocal = new THREE.Vector3(0, 15, -190); 
+    // 終點 (近端)
+    const endLocal = new THREE.Vector3(0, 15, 180);
+    
+    window.conveyorSystem.start.copy(startLocal.applyMatrix4(group.matrixWorld));
+    window.conveyorSystem.end.copy(endLocal.applyMatrix4(group.matrixWorld));
 }
+
+/* =================================================================
+   ▼ 新增功能：封箱存檔與重置 (貼在 main.js 最下方) ▼
+   ================================================================= */
+window.saveAndResetContainer = function() {
+    
+    // 1. 定義藍色容器的範圍判定函式
+    // 如果您有調整過容器大小，請稍微修改這裡的數值 (預設假設容器中心在 0,0 寬深約 100~120)
+    function isInBlueContainer(obj) {
+        // 嘗試抓取場景中的容器物件來自動判斷
+        const containerBase = scene.getObjectByName("ContainerBase");
+        
+        if (containerBase) {
+            // 方法 A:如果有容器模型，直接用它的範圍來算 (最準)
+            // 建立容器的包圍盒 (Bounding Box)
+            if (!containerBase.geometry.boundingBox) containerBase.geometry.computeBoundingBox();
+            const box = new THREE.Box3().setFromObject(containerBase);
+            //稍微放大一點點容錯 (y軸向上無限，只管 x,z 是否在範圍內)
+            const x = obj.position.x;
+            const z = obj.position.z;
+            return (x >= box.min.x - 5 && x <= box.max.x + 5 && 
+                    z >= box.min.z - 5 && z <= box.max.z + 5);
+        } else {
+            // 方法 B: 如果找不到容器物件，使用座標座標判斷 (備案)
+            // 假設藍色容器在原點，寬度 100x100
+            // 紅色暫存區通常在 X > 60 或 X < -60 的地方
+            return (Math.abs(obj.position.x) < 55 && Math.abs(obj.position.z) < 55);
+        }
+    }
+
+    // 2. 篩選出「在藍色箱子裡」的自定義物體
+    const allCustomObjects = objects.filter(obj => obj.userData.type === 'custom');
+    const objectsInBlueBox = allCustomObjects.filter(obj => isInBlueContainer(obj));
+    
+    // 3. 檢查數量
+    if (objectsInBlueBox.length === 0) {
+        // 使用簡單提示，或漂亮的 overlay 提示
+        alert("藍色箱子是空的！(暫存區的物體不會被計算在內)"); 
+        return;
+    }
+
+    // 4. 取得按鈕並顯示 Loading
+    const btn = document.getElementById('btn-reset-container') || document.querySelector('button[onclick="window.saveAndResetContainer()"]');
+    const originalText = btn ? btn.textContent : '💾 封箱存檔';
+    if(btn) btn.textContent = "封箱處理中...";
+
+    // 5. 模擬運算
+    setTimeout(() => {
+        
+        // --- A. 存檔邏輯 (只存藍色箱子裡的) ---
+        const boxData = objectsInBlueBox.map((obj, index) => ({
+            id: index, // 重新編號
+            type: obj.userData.type,
+            geometryType: obj.geometry.type,
+            position: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
+            rotation: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
+            scale: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z }
+        }));
+
+        const date = new Date();
+        const timestamp = `${date.getFullYear()}${(date.getMonth()+1).toString().padStart(2,'0')}${date.getDate()}_${date.getHours()}${date.getMinutes()}`;
+        const fileName = `BlueBox_Save_${timestamp}.json`;
+
+        // 下載檔案
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(boxData, null, 2));
+        const downloadAnchorNode = document.createElement('a');
+        downloadAnchorNode.setAttribute("href", dataStr);
+        downloadAnchorNode.setAttribute("download", fileName);
+        document.body.appendChild(downloadAnchorNode);
+        downloadAnchorNode.click();
+        downloadAnchorNode.remove();
+
+        // --- B. 清空邏輯 (只刪除藍色箱子裡的) ---
+        // 必須倒著迴圈刪除，才不會出錯
+        // 注意：我們要從全域 objects 陣列中移除這些特定的物體
+        for (let i = objectsInBlueBox.length - 1; i >= 0; i--) {
+            const targetObj = objectsInBlueBox[i];
+            
+            // 1. 從場景移除
+            scene.remove(targetObj);
+            
+            // 2. 釋放記憶體
+            if (targetObj.geometry) targetObj.geometry.dispose();
+
+            // 3. 從全域 objects 清單移除
+            const idx = objects.indexOf(targetObj);
+            if (idx > -1) {
+                objects.splice(idx, 1);
+            }
+        }
+
+        // 更新數據 (重新計算剩餘物體的體積等)
+        if (typeof renderVoidHUD === 'function') renderVoidHUD();
+        if (typeof updateChartData === 'function') updateChartData();
+
+        // --- C. 建立訊息視窗 (Overlay) ---
+        const overlay = document.createElement('div');
+        overlay.id = "saveResultOverlay";
+        Object.assign(overlay.style, {
+            position: 'fixed',
+            top: '0', left: '0', width: '100%', height: '100%',
+            background: 'rgba(0,0,0,0.4)',
+            zIndex: '9999',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backdropFilter: 'blur(3px)',
+            opacity: '0',
+            transition: 'opacity 0.3s'
+        });
+
+        const card = document.createElement('div');
+        Object.assign(card.style, {
+            background: 'rgba(20, 25, 35, 0.95)',
+            color: '#fff',
+            width: '320px',
+            padding: '25px',
+            borderRadius: '16px',
+            boxShadow: '0 20px 50px rgba(0,0,0,0.6)',
+            border: '1px solid rgba(255,255,255,0.15)',
+            textAlign: 'center',
+            fontFamily: 'system-ui, sans-serif',
+            transform: 'scale(0.9)',
+            transition: 'transform 0.3s'
+        });
+
+        card.innerHTML = `
+            <h3 style="margin:10px 0 20px 0; font-size:18px; color:#28a745;">📦 封箱作業完成</h3>
+            
+            <div style="background:rgba(255,255,255,0.05); border-radius:8px; padding:15px; margin-bottom:25px; text-align:left; line-height:1.8;">
+                已封存物件: <b>${objectsInBlueBox.length} 個</b><br>
+                保留物件(暫存區): <b style="color:#ffcc00">${allCustomObjects.length - objectsInBlueBox.length} 個</b><br>
+                容器狀態: <b style="color:#28a745; font-size:1.1em">藍色區域已清空</b>
+            </div>
+
+            <button onclick="closeSaveModal()" style="
+                background: linear-gradient(90deg, #28a745, #218838);
+                border: none;
+                color: white;
+                padding: 12px 40px;
+                border-radius: 50px;
+                font-size: 15px;
+                cursor: pointer;
+                font-weight: bold;
+                box-shadow: 0 4px 15px rgba(40, 167, 69, 0.4);
+                transition: transform 0.1s;
+                width: 100%;
+            " onmousedown="this.style.transform='scale(0.95)'" onmouseup="this.style.transform='scale(1)'">
+                確定
+            </button>
+        `;
+
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+
+        requestAnimationFrame(() => {
+            overlay.style.opacity = '1';
+            card.style.transform = 'scale(1)';
+        });
+
+        window.closeSaveModal = function() {
+            overlay.style.opacity = '0';
+            card.style.transform = 'scale(0.9)';
+            setTimeout(() => {
+                if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            }, 300);
+        };
+
+        if(btn) btn.textContent = originalText;
+
+    }, 800); 
+};
 
 function nudgeSelectedByArrow(code) {
   if (!isDragging || !selectedObj) return;
