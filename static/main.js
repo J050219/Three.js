@@ -278,8 +278,7 @@ const UNDER_AUTOMATION = (typeof navigator !== 'undefined') && navigator.webdriv
 
 const EPS = 0.5;
 const TETROMINO_TYPES = new Set(['tI','tT','tZ','tL']);
-const RIGHT_ANGLES = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
-
+const RIGHT_ANGLES = [0, Math.PI / 2, Math.PI, Math.PI * 1.5];
 // 能量權重
 const ENERGY_W_EMPTY    = 1.0;
 const ENERGY_W_FRAGMENT = 0.6;
@@ -1163,7 +1162,6 @@ function sphereVsSphereIntersect(a,b){
   return A.center.distanceToSquared(B.center) <= r*r;
 }
 
-/* ===== 強化版 isOverlapping：微縮 AABB + 同區域判定 + 球體精細測 ===== */
 /* ===== 最嚴謹 isOverlapping：跨空間一律檢測（container / staging 都算） ===== */
 function isOverlapping(ncandidate, ignore = null) {
   // 收集候選 mesh
@@ -1553,7 +1551,7 @@ function snapshotState(){ return objects.map(o=>({ obj:o, pos:o.position.clone()
 function restoreState(snap){ snap.forEach(s=>{ s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); }); }
 
 //擺放/退火（核心邏輯與節流）
-function tryBestAxisOrientation_Y(obj){
+/* function tryBestAxisOrientation_Y(obj){
   const beforePos=obj.position.clone(), beforeRot=obj.rotation.clone();
   let best={ energy:Infinity, rot:beforeRot.clone(), pos:beforePos.clone() };
   const eBase=packingEnergy();
@@ -1579,6 +1577,72 @@ function tryBestAxisOrientation_Y(obj){
     return true;
   }
   obj.rotation.copy(beforeRot); obj.position.copy(beforePos); return false;
+} */
+function snapToRightAngle(obj) {
+    // 取得目前的 Y 軸旋轉
+    const currentY = obj.rotation.y;
+    // 計算最近的 90 度 (PI/2)
+    // Math.round(角度 / 90度) * 90度
+    const snappedY = Math.round(currentY / (Math.PI / 2)) * (Math.PI / 2);
+    
+    // 強制設定：X, Z 歸零，Y 設定為標準直角
+    obj.rotation.set(0, snappedY, 0);
+    obj.updateMatrix(); // 重要：更新矩陣供後續計算使用
+}
+
+// ==========================================
+// 2. 修改：最佳化旋轉函式
+// ==========================================
+function tryBestAxisOrientation_Y(obj){
+  const beforePos = obj.position.clone(); 
+  const beforeRot = obj.rotation.clone();
+  
+  let best = { energy: Infinity, rot: beforeRot.clone(), pos: beforePos.clone() };
+  const eBase = packingEnergy();
+  
+  // 測試所有直角
+  for (const ay of RIGHT_ANGLES){
+    obj.rotation.set(0, ay, 0); // 這裡已經是乾淨的 90 度
+    const b = boundsForObjectXZ(obj);
+    obj.position.x = THREE.MathUtils.clamp(obj.position.x, b.minX, b.maxX);
+    obj.position.z = THREE.MathUtils.clamp(obj.position.z, b.minZ, b.maxZ);
+    obj.position.y = findRestingY(obj);
+    
+    if (isOverlapping(obj, obj)) continue;
+    
+    const e = packingEnergy();
+    if (e < best.energy) best = { energy: e, rot: obj.rotation.clone(), pos: obj.position.clone() };
+  }
+
+  // 採用更好姿勢
+  if (best.energy + 1e-9 < eBase) {
+    obj.rotation.copy(best.rot);
+    obj.position.copy(best.pos);
+    clampIntoAreaBounds(obj);
+    
+    if (isOverlapping(obj, obj)) {
+      // 嘗試解穿透（這一步可能會導致物體微幅旋轉）
+      resolvePenetrations(obj);
+      
+      // ★★★ 關鍵修改：解穿透後，立刻強制轉正 ★★★
+      snapToRightAngle(obj);
+
+      // 轉正後如果還是重疊，說明這個位置無效，必須回退
+      if (isOverlapping(obj, obj)) { 
+        obj.rotation.copy(beforeRot); 
+        obj.position.copy(beforePos); 
+        clampIntoAreaBounds(obj); 
+        snapToRightAngle(obj); // 保險起見，回退後也鎖定一次
+      }
+    }
+    return true;
+  }
+  
+  // 沒有更好，回退
+  obj.rotation.copy(beforeRot); 
+  obj.position.copy(beforePos); 
+  snapToRightAngle(obj); // 確保回退狀態也是正的
+  return false;
 }
 function globalCompaction(passes = 3) {
   const stepFor = (o) => Math.max(0.5, o.userData?.unit || 2);
@@ -1666,7 +1730,7 @@ function packingEnergyWithCandidate(candidate) {
   objects.pop();
   return e;
 }
-function placeInsideContainer(mesh, opts = {}) {
+/* function placeInsideContainer(mesh, opts = {}) {
   const containerBox = new THREE.Box3().setFromObject(container);
   const box = new THREE.Box3().setFromObject(mesh);
   const size = new THREE.Vector3(); box.getSize(size);
@@ -1728,8 +1792,74 @@ function placeInsideContainer(mesh, opts = {}) {
   if (isOverlapping(mesh)) { return false; }
   renderVoidHUD();
   return true;
-}
+} */
+function placeInsideContainer(mesh, opts = {}) {
+  const containerBox = new THREE.Box3().setFromObject(container);
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3(); box.getSize(size);
 
+  const padding = (opts.padding ?? 0.03);
+  const angles  = opts.angles  ?? RIGHT_ANGLES;
+
+  const grid = mesh.userData?.unit || null;
+  const stepBase = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
+  const step = Math.max(0.15, stepBase * (opts.stepScale ?? 1.0));
+  const snap = (v, g) => g ? Math.round(v / g) * g : v;
+
+  const leftX  = containerBox.min.x + size.x/2 + padding;
+  const rightX = containerBox.max.x - size.x/2 - padding;
+  const backZ  = containerBox.min.z + size.z/2 + padding;
+  const frontZ = containerBox.max.z - size.z/2 - padding;
+
+  let best = null;
+  for (let x = leftX; x <= rightX + 1e-6; x += step) {
+    for (let z = backZ; z <= frontZ + 1e-6; z += step) {
+      for (const ay of angles) {
+        mesh.rotation.set(0, ay, 0); // 這裡設定直角
+        mesh.position.set(snap(x, grid), 0, snap(z, grid));
+        mesh.position.y = findRestingY(mesh);
+
+        if (!isInsideContainerAABB(mesh)) continue;
+        if (isOverlapping(mesh, mesh)) continue;
+
+        const e = FAST_PACKING ? 0 : packingEnergyWithCandidate(mesh);
+        const b = new THREE.Box3().setFromObject(mesh);
+        const tie = best && Math.abs(e - best.energy) < 1e-9;
+
+        if (!best || e < best.energy - 1e-9 ||
+           (tie && (b.min.y < best.boxMinY - 1e-6 ||
+                   (Math.abs(b.min.y - best.boxMinY) < 1e-6 &&
+                    (b.min.x + b.min.z) < (best.boxMinX + best.boxMinZ) - 1e-6)))) {
+          best = { energy:e, pos:mesh.position.clone(), rot:mesh.rotation.clone(),
+                   boxMinY:b.min.y, boxMinX:b.min.x, boxMinZ:b.min.z };
+        }
+      }
+    }
+  }
+  if (!best) return false;
+
+  mesh.position.copy(best.pos);
+  mesh.rotation.copy(best.rot);
+  clampIntoAreaBounds(mesh);
+  if (isOverlapping(mesh)) return false;
+
+  ensureInScene(mesh);
+  tryBestAxisOrientation_Y(mesh); // 內部已加入強制修正
+  mesh.position.y = findRestingY(mesh);
+  clampIntoAreaBounds(mesh);
+  globalCompaction(3);
+  shakeAndSettle();
+
+  // 放定點後做一次解穿透（保險）
+  resolvePenetrations(mesh);
+  
+  // ★★★ 關鍵修改：最後這一道解穿透最容易導致歪斜，必須修正 ★★★
+  snapToRightAngle(mesh);
+
+  if (isOverlapping(mesh)) { return false; }
+  renderVoidHUD();
+  return true;
+}
 /* ===== 強化版 placeInStaging：格點+間隙+螺旋搜尋（避免重疊） ===== */
 function placeInStaging(mesh) {
   const box = new THREE.Box3().setFromObject(mesh);
@@ -2176,158 +2306,124 @@ const mouse = new THREE.Vector2();
 const planeIntersect = new THREE.Vector3();
 let spaceDown = false;
 let lastMouseY = 0;
-let isRotating = false;
-const rotateStart = new THREE.Vector2();
-const initialRot = new THREE.Euler();
-
-// 拖曳安全回退（新增）
-let lastSafePos = null;
 
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function liftOutOfOverlap(obj) {
-  const sb=new THREE.Box3().setFromObject(obj);
-  const s=new THREE.Vector3(); sb.getSize(s);
-  const half=s.clone().multiplyScalar(0.5);
-  const area=getAreaByXZ(obj.position.x, obj.position.z) || 'container';
-  const b=getBoundsForArea(area, half);
-  const probe=obj.clone();
-  let y=THREE.MathUtils.clamp(obj.position.y, b.minY, b.maxY);
-  probe.position.set(obj.position.x, y, obj.position.z);
-  let guard=0;
-  while (isOverlapping(probe, obj) && y<=b.maxY){ y+=0.5; probe.position.y=y; if (++guard>2000) break; }
-  return y;
-}
-
-renderer.domElement.addEventListener('mousedown', (event) => {
-  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-
-  const intersects = raycaster.intersectObjects(objects, true);
-  if (intersects.length === 0 ) {
-    if (event.button === 0 && !event.shiftKey) {
-      selectedObj = null;
-      showSelection(null);
+    const sb = new THREE.Box3().setFromObject(obj);
+    const s  = new THREE.Vector3(); sb.getSize(s);
+    const half = s.clone().multiplyScalar(0.5);
+    const area = getAreaByXZ(obj.position.x, obj.position.z) || 'container';
+    const b = getBoundsForArea(area, half);
+    const probe = obj.clone();
+    let y = THREE.MathUtils.clamp(obj.position.y, b.minY, b.maxY);
+    probe.position.set(obj.position.x, y, obj.position.z);
+    let guard = 0;
+    while (isOverlapping(probe, obj) && y <= b.maxY) {
+        y += 0.5;
+        probe.position.y = y;
+        if (++guard > 2000) break;
     }
-    return;
-  }
-  currentTarget = intersects[0].object;
-  while (currentTarget.parent && !currentTarget.userData.type) currentTarget = currentTarget.parent;
-  selectedObj = currentTarget; showSelection(selectedObj);
+    return y;
+}
+renderer.domElement.addEventListener('mousedown', (event) => {
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(objects, true);
+    // 點擊空白處
+    if (intersects.length === 0 ) {
+        if (event.button === 0 && !event.shiftKey) {
+            selectedObj = null;
+            showSelection(null);
+        }
+        return;
+    }
+    // 選取物體邏輯
+    currentTarget = intersects[0].object;
+    while (currentTarget.parent && !currentTarget.userData.type) {
+        currentTarget = currentTarget.parent;
+    }
+    selectedObj = currentTarget;
+    showSelection(selectedObj);
+    // 左鍵點擊：跳躍動畫
+    if (event.button === 0) {
+        const jumpHeight = 10;
+        const targBox = new THREE.Box3().setFromObject(currentTarget);
+        const tsize = new THREE.Vector3(); targBox.getSize(tsize);
+        const half = tsize.clone().multiplyScalar(0.5);
+        const areaNow = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+        const originalY = findRestingYForArea(currentTarget, areaNow, half);
 
-  // 記住安全座標
-  lastSafePos = selectedObj.position.clone();
+        const jumpUp = new TWEEN.Tween(currentTarget.position)
+            .to({ y: originalY + jumpHeight }, 150)
+            .easing(TWEEN.Easing.Quadratic.Out);
 
-  if (event.button === 0 && event.shiftKey && selectedObj) {
-    isRotating = true;
-    rotateStart.set(event.clientX, event.clientY);
-    initialRot.copy(selectedObj.rotation);
-    controls.enabled = false;
-    return;
-  }
-  if (event.button === 0) {
-    const jumpHeight = 10;
-    const targBox = new THREE.Box3().setFromObject(currentTarget);
-    const tsize = new THREE.Vector3(); targBox.getSize(tsize);
-    const half = tsize.clone().multiplyScalar(0.5);
-    const areaNow = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
-    const originalY = findRestingYForArea(currentTarget, areaNow, half);
-
-    const jumpUp = new TWEEN.Tween(currentTarget.position).to({ y: originalY + jumpHeight }, 150).easing(TWEEN.Easing.Quadratic.Out);
-    const fallDown = new TWEEN.Tween(currentTarget.position).to({ y: originalY }, 300).easing(TWEEN.Easing.Bounce.Out);
-    jumpUp.chain(fallDown).start();
-  }
-  if (event.button === 2) {
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-    raycaster.ray.intersectPlane(plane, planeIntersect);
-    offset.copy(planeIntersect).sub(currentTarget.position);
-    isDragging = true;
-    lastMouseY = event.clientY;
-  }
+        const fallDown = new TWEEN.Tween(currentTarget.position)
+            .to({ y: originalY }, 300)
+            .easing(TWEEN.Easing.Bounce.Out);
+        jumpUp.chain(fallDown).start();
+    }
+    // 右鍵點擊：開始拖曳
+    if (event.button === 2) {
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        raycaster.ray.intersectPlane(plane, planeIntersect);
+        offset.copy(planeIntersect).sub(currentTarget.position);
+        isDragging = true;
+        lastMouseY = event.clientY;        
+    }
 });
 renderer.domElement.addEventListener('mouseup', () => {
-  isDragging = false;
-  currentTarget = null;
-  if (isRotating) { isRotating = false; controls.enabled = true; }
-  if (selectedObj) clampIntoAreaBounds(selectedObj);
-
-  if (selectedObj) {
-    // 解穿透；若還是重疊就退回最後安全位置
-    resolvePenetrations(selectedObj);
-    if (isOverlapping(selectedObj, selectedObj) && lastSafePos) {
-      selectedObj.position.copy(lastSafePos);
-      clampIntoAreaBounds(selectedObj);
-      resolvePenetrations(selectedObj);
+    isDragging = false;
+    currentTarget = null;
+    controls.enabled = true;
+    if (selectedObj) {
+        const sb = new THREE.Box3().setFromObject(selectedObj);
+        const s = new THREE.Vector3();
+        sb.getSize(s);
+        const half = s.clone().multiplyScalar(0.5);
+        const area = getAreaByXZ(selectedObj.position.x, selectedObj.position.z) || 'container';
+        
+        if (!spaceDown) {
+            selectedObj.position.y = findRestingYForArea(selectedObj, area, half);
+        } else {
+            selectedObj.position.y = liftOutOfOverlap(selectedObj);
+        }
     }
-  }
-
-  renderVoidHUD();
 });
-renderer.domElement.addEventListener('mousemove',(event) =>{
-  if (isRotating && selectedObj) {
-    const dx = event.clientX - rotateStart.x;
-    const dy = event.clientY - rotateStart.y;
-    selectedObj.rotation.y = initialRot.y + dx * 0.01;
-    selectedObj.rotation.x = THREE.MathUtils.clamp(initialRot.x + dy * 0.01, -Math.PI/2, Math.PI/2);
-    if (selectionHelper) selectionHelper.update();
-    return;
-  }
-  if (!isDragging || !currentTarget) return;
-  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-
-  const targetBox=new THREE.Box3().setFromObject(currentTarget);
-  const targetSize=new THREE.Vector3(); targetBox.getSize(targetSize);
-  const halfSize=targetSize.clone().multiplyScalar(0.5);
-
-  if (!spaceDown) {
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-    if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
-      const newPos = planeIntersect.clone().sub(offset);
-      const area = getAreaByXZ(newPos.x, newPos.z) || getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
-      const b = getBoundsForArea(area, halfSize);
-      newPos.x = THREE.MathUtils.clamp(newPos.x, b.minX, b.maxX);
-      newPos.z = THREE.MathUtils.clamp(newPos.z, b.minZ, b.maxZ);
-
-      const testBox = currentTarget.clone();
-      testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
-
-      if (!isOverlapping(testBox, currentTarget)) {
-        currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
-        clampIntoAreaBounds(currentTarget);
-      }
-
-      // 拖曳安全回退（若造成重疊 → 回到 lastSafePos）
-      const afterMove = currentTarget.position.clone();
-      if (isOverlapping(currentTarget, currentTarget)) {
-        currentTarget.position.copy(lastSafePos);
-      } else {
-        lastSafePos = afterMove.clone();
-      }
-    }
-  } else {
-    const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
-    const b = getBoundsForArea(area, halfSize);
-    const dy = (lastMouseY - event.clientY) * 0.1;
-    let tryY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
-
-    const probe=currentTarget.clone();
-    probe.position.set(currentTarget.position.x, tryY, currentTarget.position.z);
-    if (!isOverlapping(probe, currentTarget)) currentTarget.position.y = tryY;
-    else currentTarget.position.y = liftOutOfOverlap(currentTarget);
-    clampIntoAreaBounds(currentTarget);
-
-    // 垂直拖曳也做安全回退
-    const afterMove = currentTarget.position.clone();
-    if (isOverlapping(currentTarget, currentTarget)) {
-      currentTarget.position.copy(lastSafePos);
+renderer.domElement.addEventListener('mousemove', (event) => {
+    if (!isDragging || !currentTarget) return;
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const targetBox = new THREE.Box3().setFromObject(currentTarget);
+    const targetSize = new THREE.Vector3();
+    targetBox.getSize(targetSize);
+    const halfSize = targetSize.clone().multiplyScalar(0.5);
+    if (!spaceDown) {
+        // 水平拖曳
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        if (raycaster.ray.intersectPlane(plane, planeIntersect)) {
+            const newPos = planeIntersect.clone().sub(offset);
+            const area = getAreaByXZ(newPos.x, newPos.z) || getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+            const b = getBoundsForArea(area, halfSize);
+            newPos.x = THREE.MathUtils.clamp(newPos.x, b.minX, b.maxX);
+            newPos.z = THREE.MathUtils.clamp(newPos.z, b.minZ, b.maxZ);
+            const testBox = currentTarget.clone();
+            testBox.position.set(newPos.x, currentTarget.position.y, newPos.z);
+            if (!isOverlapping(testBox, currentTarget)) {
+                currentTarget.position.set(newPos.x, currentTarget.position.y, newPos.z);
+            }
+        }
     } else {
-      lastSafePos = afterMove.clone();
+        // 垂直拖曳
+        const area = getAreaByXZ(currentTarget.position.x, currentTarget.position.z) || 'container';
+        const b = getBoundsForArea(area, halfSize);
+        const dy = (lastMouseY - event.clientY) * 0.1;
+        let newY = THREE.MathUtils.clamp(currentTarget.position.y + dy, b.minY, b.maxY);
+        currentTarget.position.y = newY;
+        lastMouseY = event.clientY;
     }
-    lastMouseY = event.clientY;
-  }
 });
 
 /* =========================================
@@ -2442,17 +2538,12 @@ window.saveAndResetContainer = function() {
         downloadAnchorNode.remove();
 
         // --- B. 清空邏輯 (只刪除藍色箱子裡的) ---
-        // 必須倒著迴圈刪除，才不會出錯
-        // 注意：我們要從全域 objects 陣列中移除這些特定的物體
         for (let i = objectsInBlueBox.length - 1; i >= 0; i--) {
             const targetObj = objectsInBlueBox[i];
-            
             // 1. 從場景移除
             scene.remove(targetObj);
-            
             // 2. 釋放記憶體
             if (targetObj.geometry) targetObj.geometry.dispose();
-
             // 3. 從全域 objects 清單移除
             const idx = objects.indexOf(targetObj);
             if (idx > -1) {
@@ -2496,7 +2587,7 @@ window.saveAndResetContainer = function() {
         });
 
         card.innerHTML = `
-            <h3 style="margin:10px 0 20px 0; font-size:18px; color:#28a745;">📦 封箱作業完成</h3>
+            <h3 style="margin:10px 0 20px 0; font-size:18px; color:#28a745;">封箱作業完成</h3>
             
             <div style="background:rgba(255,255,255,0.05); border-radius:8px; padding:15px; margin-bottom:25px; text-align:left; line-height:1.8;">
                 已封存物件: <b>${objectsInBlueBox.length} 個</b><br>
@@ -2672,22 +2763,18 @@ window.exportGLB = function() {
 };
 
 // 2. 綁定「計算空隙」
-// ✅ 修改：綁定到 window，改為手動關閉視窗
 window.calculateVoid = function() {
     // 1. 取得按鈕並顯示 Loading
     const btn = document.querySelector('button[onclick="calculateVoid()"]');
     const originalText = btn ? btn.textContent : '估算空隙';
     if(btn) btn.textContent = "計算中... (請稍候)";
-
     // 2. 模擬運算延遲 (1.5秒)
     setTimeout(() => {
         const r = measureBlueVoid();
-        
         // 格式化數字
         const emptyPct = (r.emptyRatio * 100).toFixed(1);
         const solidVol = Math.round(r.solidVolume / 1000);
         const totalVol = Math.round(r.containerVolume / 1000);
-
         // 3. 建立自製訊息視窗 (Overlay)
         const overlay = document.createElement('div');
         overlay.id = "voidResultOverlay";
@@ -2703,7 +2790,6 @@ window.calculateVoid = function() {
             opacity: '0',
             transition: 'opacity 0.3s'
         });
-
         // 4. 視窗內容 (Card)
         const card = document.createElement('div');
         Object.assign(card.style, {
@@ -2719,7 +2805,6 @@ window.calculateVoid = function() {
             transform: 'scale(0.9)',
             transition: 'transform 0.3s'
         });
-
         // HTML 內容：包含右上角叉叉 & 底部按鈕
         card.innerHTML = `
             <div style="position:absolute; top:15px; right:15px; cursor:pointer; font-size:18px; color:#888;" onclick="closeVoidModal()">✕</div>
@@ -2750,7 +2835,6 @@ window.calculateVoid = function() {
 
         overlay.appendChild(card);
         document.body.appendChild(overlay);
-
         // 動畫進場
         requestAnimationFrame(() => {
             overlay.style.opacity = '1';
@@ -2765,7 +2849,6 @@ window.calculateVoid = function() {
                 if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
             }, 300);
         };
-
         // 還原按鈕文字
         if(btn) btn.textContent = originalText;
 
