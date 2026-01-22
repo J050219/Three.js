@@ -1551,7 +1551,7 @@ function snapshotState(){ return objects.map(o=>({ obj:o, pos:o.position.clone()
 function restoreState(snap){ snap.forEach(s=>{ s.obj.position.copy(s.pos); s.obj.rotation.copy(s.rot); }); }
 
 //擺放/退火（核心邏輯與節流）
-/* function tryBestAxisOrientation_Y(obj){
+function tryBestAxisOrientation_Y(obj){
   const beforePos=obj.position.clone(), beforeRot=obj.rotation.clone();
   let best={ energy:Infinity, rot:beforeRot.clone(), pos:beforePos.clone() };
   const eBase=packingEnergy();
@@ -1577,72 +1577,6 @@ function restoreState(snap){ snap.forEach(s=>{ s.obj.position.copy(s.pos); s.obj
     return true;
   }
   obj.rotation.copy(beforeRot); obj.position.copy(beforePos); return false;
-} */
-function snapToRightAngle(obj) {
-    // 取得目前的 Y 軸旋轉
-    const currentY = obj.rotation.y;
-    // 計算最近的 90 度 (PI/2)
-    // Math.round(角度 / 90度) * 90度
-    const snappedY = Math.round(currentY / (Math.PI / 2)) * (Math.PI / 2);
-    
-    // 強制設定：X, Z 歸零，Y 設定為標準直角
-    obj.rotation.set(0, snappedY, 0);
-    obj.updateMatrix(); // 重要：更新矩陣供後續計算使用
-}
-
-// ==========================================
-// 2. 修改：最佳化旋轉函式
-// ==========================================
-function tryBestAxisOrientation_Y(obj){
-  const beforePos = obj.position.clone(); 
-  const beforeRot = obj.rotation.clone();
-  
-  let best = { energy: Infinity, rot: beforeRot.clone(), pos: beforePos.clone() };
-  const eBase = packingEnergy();
-  
-  // 測試所有直角
-  for (const ay of RIGHT_ANGLES){
-    obj.rotation.set(0, ay, 0); // 這裡已經是乾淨的 90 度
-    const b = boundsForObjectXZ(obj);
-    obj.position.x = THREE.MathUtils.clamp(obj.position.x, b.minX, b.maxX);
-    obj.position.z = THREE.MathUtils.clamp(obj.position.z, b.minZ, b.maxZ);
-    obj.position.y = findRestingY(obj);
-    
-    if (isOverlapping(obj, obj)) continue;
-    
-    const e = packingEnergy();
-    if (e < best.energy) best = { energy: e, rot: obj.rotation.clone(), pos: obj.position.clone() };
-  }
-
-  // 採用更好姿勢
-  if (best.energy + 1e-9 < eBase) {
-    obj.rotation.copy(best.rot);
-    obj.position.copy(best.pos);
-    clampIntoAreaBounds(obj);
-    
-    if (isOverlapping(obj, obj)) {
-      // 嘗試解穿透（這一步可能會導致物體微幅旋轉）
-      resolvePenetrations(obj);
-      
-      // ★★★ 關鍵修改：解穿透後，立刻強制轉正 ★★★
-      snapToRightAngle(obj);
-
-      // 轉正後如果還是重疊，說明這個位置無效，必須回退
-      if (isOverlapping(obj, obj)) { 
-        obj.rotation.copy(beforeRot); 
-        obj.position.copy(beforePos); 
-        clampIntoAreaBounds(obj); 
-        snapToRightAngle(obj); // 保險起見，回退後也鎖定一次
-      }
-    }
-    return true;
-  }
-  
-  // 沒有更好，回退
-  obj.rotation.copy(beforeRot); 
-  obj.position.copy(beforePos); 
-  snapToRightAngle(obj); // 確保回退狀態也是正的
-  return false;
 }
 function globalCompaction(passes = 3) {
   const stepFor = (o) => Math.max(0.5, o.userData?.unit || 2);
@@ -1730,7 +1664,7 @@ function packingEnergyWithCandidate(candidate) {
   objects.pop();
   return e;
 }
-/* function placeInsideContainer(mesh, opts = {}) {
+function placeInsideContainer(mesh, opts = {}) {
   const containerBox = new THREE.Box3().setFromObject(container);
   const box = new THREE.Box3().setFromObject(mesh);
   const size = new THREE.Vector3(); box.getSize(size);
@@ -1792,74 +1726,8 @@ function packingEnergyWithCandidate(candidate) {
   if (isOverlapping(mesh)) { return false; }
   renderVoidHUD();
   return true;
-} */
-function placeInsideContainer(mesh, opts = {}) {
-  const containerBox = new THREE.Box3().setFromObject(container);
-  const box = new THREE.Box3().setFromObject(mesh);
-  const size = new THREE.Vector3(); box.getSize(size);
-
-  const padding = (opts.padding ?? 0.03);
-  const angles  = opts.angles  ?? RIGHT_ANGLES;
-
-  const grid = mesh.userData?.unit || null;
-  const stepBase = grid ? Math.max(grid/2, 0.35) : Math.max(0.35, Math.min(size.x, size.z)/8);
-  const step = Math.max(0.15, stepBase * (opts.stepScale ?? 1.0));
-  const snap = (v, g) => g ? Math.round(v / g) * g : v;
-
-  const leftX  = containerBox.min.x + size.x/2 + padding;
-  const rightX = containerBox.max.x - size.x/2 - padding;
-  const backZ  = containerBox.min.z + size.z/2 + padding;
-  const frontZ = containerBox.max.z - size.z/2 - padding;
-
-  let best = null;
-  for (let x = leftX; x <= rightX + 1e-6; x += step) {
-    for (let z = backZ; z <= frontZ + 1e-6; z += step) {
-      for (const ay of angles) {
-        mesh.rotation.set(0, ay, 0); // 這裡設定直角
-        mesh.position.set(snap(x, grid), 0, snap(z, grid));
-        mesh.position.y = findRestingY(mesh);
-
-        if (!isInsideContainerAABB(mesh)) continue;
-        if (isOverlapping(mesh, mesh)) continue;
-
-        const e = FAST_PACKING ? 0 : packingEnergyWithCandidate(mesh);
-        const b = new THREE.Box3().setFromObject(mesh);
-        const tie = best && Math.abs(e - best.energy) < 1e-9;
-
-        if (!best || e < best.energy - 1e-9 ||
-           (tie && (b.min.y < best.boxMinY - 1e-6 ||
-                   (Math.abs(b.min.y - best.boxMinY) < 1e-6 &&
-                    (b.min.x + b.min.z) < (best.boxMinX + best.boxMinZ) - 1e-6)))) {
-          best = { energy:e, pos:mesh.position.clone(), rot:mesh.rotation.clone(),
-                   boxMinY:b.min.y, boxMinX:b.min.x, boxMinZ:b.min.z };
-        }
-      }
-    }
-  }
-  if (!best) return false;
-
-  mesh.position.copy(best.pos);
-  mesh.rotation.copy(best.rot);
-  clampIntoAreaBounds(mesh);
-  if (isOverlapping(mesh)) return false;
-
-  ensureInScene(mesh);
-  tryBestAxisOrientation_Y(mesh); // 內部已加入強制修正
-  mesh.position.y = findRestingY(mesh);
-  clampIntoAreaBounds(mesh);
-  globalCompaction(3);
-  shakeAndSettle();
-
-  // 放定點後做一次解穿透（保險）
-  resolvePenetrations(mesh);
-  
-  // ★★★ 關鍵修改：最後這一道解穿透最容易導致歪斜，必須修正 ★★★
-  snapToRightAngle(mesh);
-
-  if (isOverlapping(mesh)) { return false; }
-  renderVoidHUD();
-  return true;
 }
+
 /* ===== 強化版 placeInStaging：格點+間隙+螺旋搜尋（避免重疊） ===== */
 function placeInStaging(mesh) {
   const box = new THREE.Box3().setFromObject(mesh);
