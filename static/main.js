@@ -2383,14 +2383,27 @@ window.saveAndResetContainer = function() {
     setTimeout(() => {
         
         // --- A. 存檔邏輯 (只存藍色箱子裡的) ---
-        const boxData = objectsInBlueBox.map((obj, index) => ({
-            id: index, // 重新編號
-            type: obj.userData.type,
-            geometryType: obj.geometry.type,
-            position: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
-            rotation: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
-            scale: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z }
-        }));
+        const boxData = objectsInBlueBox.map((obj, index) => {
+          // 防呆：如果是 Group 或沒有 geometry 的物件，給予預設值
+          const geoType = (obj.geometry && obj.geometry.type) ? obj.geometry.type : 'Group';
+          
+          // 防呆：確保 scale 存在
+          const s = obj.scale || { x:1, y:1, z:1 };
+
+          return {
+              id: index, // 重新編號
+              type: obj.userData.type,
+              geometryType: geoType, // ★ 修正點：這裡加了檢查
+              position: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
+              rotation: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
+              scale: { x: s.x, y: s.y, z: s.z },
+              color: (obj.material && obj.material.color) ? ('#' + obj.material.color.getHexString()) : '#ffffff',
+              // 如果有尺寸資訊也存下來
+              width: obj.userData.width || 1,
+              height: obj.userData.height || 1,
+              depth: obj.userData.depth || 1
+          };
+      });
 
         const date = new Date();
         const timestamp = `${date.getFullYear()}${(date.getMonth()+1).toString().padStart(2,'0')}${date.getDate()}_${date.getHours()}${date.getMinutes()}`;
